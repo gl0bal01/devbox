@@ -1,0 +1,30 @@
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit these)
+*.ovpn
+*.pem
+*.key
+acme.json
+secrets/
+
+# Logs
+*.log
+logs/
+
+# Data directories
+*-data/
+data/
+
+# Local testing
+.env.local
+.env.*.local
+test/
