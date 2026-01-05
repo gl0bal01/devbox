@@ -1,4 +1,4 @@
-# Devbox
+# DevBox
 
 Automated provisioning script for secure remote development, pentesting, and AI workstations on Ubuntu 24.04 VPS instances.
 
