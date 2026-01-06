@@ -610,6 +610,7 @@ cat > "${DOCKER_DIR}/ollama-openwebui/docker-compose.yml" << EOF
 services:
   ollama:
     image: ollama/ollama:latest
+    # mem_limit: 24gb <- Add this for Hostinger KVM 8 and fast GGUF i1-Q4_K_M models
     container_name: ollama
     restart: unless-stopped
     volumes:
