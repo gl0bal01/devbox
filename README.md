@@ -26,21 +26,21 @@ The entire stack runs behind Tailscale with no public ports exposed (except SSH)
     +------------------------------------+------------------------------------+
     |                                   VPS                                   |
     |                                                                         |
-    |   [Tailscale] <---> [Your Devices]                                     |
+    |   [Tailscale] <---> [Your Devices]                                      |
     |        |                                                                |
     |        v                                                                |
-    |   [Traefik :80] ----+---- [code-server]     code.internal              |
+    |   [Traefik :80] ----+---- [code-server]     code.internal               |
     |     (internal)      |                                                   |
-    |                     +---- [Open WebUI]      ai.internal                |
+    |                     +---- [Open WebUI]      ai.internal                 |
     |                     |                                                   |
-    |                     +---- [Ollama API]      ollama.internal            |
+    |                     +---- [Ollama API]      ollama.internal             |
     |                     |                                                   |
-    |                     +---- [Traefik Dashboard] traefik.internal         |
+    |                     +---- [Traefik Dashboard] traefik.internal          |
     |                                                                         |
-    |   [Exegol Container] <---> [HTB/THM VPN]                               |
+    |   [Exegol Container] <---> [HTB/THM VPN]                                |
     |        (on-demand, host network)                                        |
     |                                                                         |
-    +---------------------------------------------------------------------------+
+    +-------------------------------------------------------------------------+
 ```
 
 ## Requirements
@@ -142,17 +142,17 @@ Replace `TAILSCALE_IP` with your server's Tailscale IP (`tailscale ip -4`).
 
 ```bash
 # Interactive menu
-./aidev_stack.sh
+./install-ai-dev-stack.sh
 
 # Or install directly
-./aidev_stack.sh --all           # Install all tools
-./aidev_stack.sh --claude        # Claude Code only
-./aidev_stack.sh --opencode      # OpenCode only
-./aidev_stack.sh --goose         # Goose only
-./aidev_stack.sh --llm           # LLM (Datasette) only
-./aidev_stack.sh --fabric        # Fabric only
-./aidev_stack.sh --status        # Check what's installed
-./aidev_stack.sh --update        # Update all installed tools
+./install-ai-dev-stack.sh --all           # Install all tools
+./install-ai-dev-stack.sh --claude        # Claude Code only
+./install-ai-dev-stack.sh --opencode      # OpenCode only
+./install-ai-dev-stack.sh --goose         # Goose only
+./install-ai-dev-stack.sh --llm           # LLM (Datasette) only
+./install-ai-dev-stack.sh --fabric        # Fabric only
+./install-ai-dev-stack.sh --status        # Check what's installed
+./install-ai-dev-stack.sh --update        # Update all installed tools
 ```
 
 After installation:
