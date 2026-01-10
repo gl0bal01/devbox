@@ -77,19 +77,20 @@ curl http://localhost:11434/api/generate -d '{
 
 ---
 
-## Claude Code
+## Ai Dev Stack
 
 ```bash
-# Install (first time)
-./install-claude-code.sh
-claude login
+# Interactive menu
+./install-ai-dev-stack.sh
+```
 
-# Usage
-cd ~/projects/myapp
-claude "explain this codebase"
-claude "fix the bug in auth.py"
-claude "add error handling to api.js"
-claude "write unit tests for utils.py"
+After installation:
+```bash
+claude login                     # Authenticate Claude Code
+goose configure                  # Configure Goose
+llm keys set openai              # Set OpenAI key for LLM
+fabric --setup                   # Configure Fabric
+export ANTHROPIC_API_KEY=...     # Set key for OpenCode
 ```
 
 ---
@@ -184,7 +185,7 @@ vim                      # or: nvim
 │   └── htb-vpn.sh
 ├── projects/                 # Your code projects
 ├── htb/                      # HTB OVPN files
-└── install-claude-code.sh
+└── install-ai-dev-stack.sh
 ```
 
 ---
