@@ -11,7 +11,7 @@ This script transforms a fresh Ubuntu 24.04 VPS into a fully configured developm
 - Local AI inference with Ollama and Open WebUI
 - Browser-based IDE with code-server
 - Pentest toolkit with Exegol
-- Claude Code CLI integration
+- AI Coding Tools
 
 The entire stack runs behind Tailscale with no public ports exposed (except SSH), making it suitable for sensitive development and security research.
 
@@ -91,6 +91,11 @@ DOMAIN="example.com"                    # Your domain (optional)
 | Ollama | Local LLM inference server |
 | Open WebUI | Chat interface for Ollama |
 | code-server | VS Code in browser |
+| Claude Code | CLI tool for AI-assisted coding (installer provided) |
+| OpenCode | Open-source multi-provider AI coding (installer provided) |
+| Goose | Block's AI coding agent (installer provided) |
+| LLM | Datasette CLI for LLMs (installer provided) |
+| Fabric | AI prompts framework (installer provided) |
 | mise | Polyglot version manager (node, python, go, etc.) |
 | lazygit | Terminal UI for git |
 | lazydocker | Terminal UI for Docker |
@@ -133,11 +138,30 @@ TAILSCALE_IP  code.internal ai.internal traefik.internal ollama.internal
 
 Replace `TAILSCALE_IP` with your server's Tailscale IP (`tailscale ip -4`).
 
-### 5. Install Claude Code (Optional)
+### 5. Install AI Coding Tools (Optional)
 
 ```bash
-./install-claude-code.sh
-claude login
+# Interactive menu
+./aidev_stack.sh
+
+# Or install directly
+./aidev_stack.sh --all           # Install all tools
+./aidev_stack.sh --claude        # Claude Code only
+./aidev_stack.sh --opencode      # OpenCode only
+./aidev_stack.sh --goose         # Goose only
+./aidev_stack.sh --llm           # LLM (Datasette) only
+./aidev_stack.sh --fabric        # Fabric only
+./aidev_stack.sh --status        # Check what's installed
+./aidev_stack.sh --update        # Update all installed tools
+```
+
+After installation:
+```bash
+claude login                     # Authenticate Claude Code
+goose configure                  # Configure Goose
+llm keys set openai              # Set OpenAI key for LLM
+fabric --setup                   # Configure Fabric
+export ANTHROPIC_API_KEY=...     # Set key for OpenCode
 ```
 
 ### 6. Pull Ollama Models
@@ -243,7 +267,7 @@ tsdown          # Disconnect Tailscale
 │   └── htb-vpn.sh
 ├── projects/
 ├── htb/
-└── install-claude-code.sh
+└── install-ai-dev-stack.sh
 ```
 
 ## Security Considerations
@@ -382,6 +406,11 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [Tailscale Documentation](https://tailscale.com/kb/)
 - [Traefik Documentation](https://doc.traefik.io/traefik/)
 - [Ollama Documentation](https://ollama.ai/)
+- [Claude Code Documentation](https://docs.anthropic.com/en/docs/claude-code)
+- [OpenCode Documentation](https://github.com/opencode-ai/opencode)
+- [Goose Documentation](https://block.github.io/goose/)
+- [LLM Documentation](https://llm.datasette.io/)
+- [Fabric Documentation](https://github.com/danielmiessler/fabric)
 - [Exegol Documentation](https://exegol.readthedocs.io/)
 - [code-server Documentation](https://coder.com/docs/code-server/)
 - [LazyVim Documentation](https://www.lazyvim.org/)
