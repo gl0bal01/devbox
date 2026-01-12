@@ -27,7 +27,6 @@ status
 cd ~/docker
 docker compose -f traefik/docker-compose.yml up -d
 docker compose -f ollama-openwebui/docker-compose.yml up -d
-docker compose -f code-server/docker-compose.yml up -d
 ```
 
 ---
@@ -40,15 +39,14 @@ docker compose -f code-server/docker-compose.yml up -d
 tailscale ip -4
 
 # Add to /etc/hosts on your laptop:
-100.x.x.x  code.internal ai.internal traefik.internal ollama.internal
+100.x.x.x  ai.internal traefik.internal ollama.internal
 ```
 
 ### URLs:
 | Service | URL | Notes |
 |---------|-----|-------|
-| VS Code | http://code.internal | Password in setup output |
 | Open WebUI | http://ai.internal | Chat with Ollama models |
-| Traefik | http://traefik.internal | Dashboard |
+| Traefik | http://traefik.internal | Dashboard (Basic Auth) |
 | Ollama API | http://ollama.internal | Or localhost:11434 |
 
 ---
@@ -169,23 +167,23 @@ vim                      # or: nvim
 ```
 ~/
 ├── docker/
-│   ├── traefik/              # Reverse proxy
+│   ├── traefik/              # Reverse proxy + socket proxy
 │   │   ├── docker-compose.yml
 │   │   ├── traefik.yml
 │   │   └── dynamic/
-│   ├── ollama-openwebui/     # AI stack
-│   │   └── docker-compose.yml
-│   ├── code-server/          # VS Code
-│   │   └── docker-compose.yml
+│   ├── ollama-openwebui/     # AI stack (Ollama + Open WebUI)
+│   │   ├── docker-compose.yml
+│   │   └── .env
 │   ├── exegol-workspace/     # Pentest workspace
 │   ├── start-all.sh
 │   ├── stop-all.sh
 │   ├── status.sh
+│   ├── security-check.sh
 │   ├── exegol-htb.sh
 │   └── htb-vpn.sh
 ├── projects/                 # Your code projects
 ├── htb/                      # HTB OVPN files
-└── install-ai-dev-stack.sh
+└── install-ai-dev-stack.sh   # AI Dev Stack installer
 ```
 
 ---
@@ -221,7 +219,7 @@ journalctl -u sshd -f            # SSH logs
 
 # DNS not resolving?
 cat /etc/hosts                    # Check local hosts
-ping code.internal                # Test resolution
+ping ai.internal                  # Test resolution
 ```
 
 ---

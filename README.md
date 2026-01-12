@@ -9,11 +9,27 @@ This script transforms a fresh Ubuntu 24.04 VPS into a fully configured developm
 - Zero-trust network access via Tailscale
 - Internal service routing via Traefik
 - Local AI inference with Ollama and Open WebUI
-- Browser-based IDE with code-server
 - Pentest toolkit with Exegol
-- AI Coding Tools
+- AI Coding Tools (Claude Code, OpenCode, Goose, LLM, Fabric)
+- Remote development via SSH with tmux/neovim
 
 The entire stack runs behind Tailscale with no public ports exposed (except SSH), making it suitable for sensitive development and security research.
+
+### Security Hardened (v2.3)
+
+All containers are configured with defense-in-depth security measures:
+
+- **Secrets Management**: Stored in `.env` files with 600 permissions, credentials written to secure file (not terminal)
+- **SSH Key Configuration**: Read from environment variable or file (no hardcoded keys)
+- **Docker Socket Proxy**: Prevents container escape, INFO endpoint disabled
+- **Container Security**: All containers run with `no-new-privileges`, `cap_drop: ALL`, and minimal capabilities
+- **Traefik Security**: Dashboard protected with basicAuth, `api.insecure: false`, log rotation enabled
+- **Resource Limits**: Memory, CPU, and PID limits on all containers
+- **UFW Firewall**: Confirmation prompt before reset, preserves existing rules
+- **SSH Hardening**: Key-only auth, uses modern `KbdInteractiveAuthentication` directive
+- **VPN Security**: OVPN files auto-enforced to 600 permissions
+- **Exegol Warnings**: Clear security warnings when running with disabled AppArmor/seccomp
+- Health checks on all services
 
 ## Architecture
 
@@ -29,16 +45,20 @@ The entire stack runs behind Tailscale with no public ports exposed (except SSH)
     |   [Tailscale] <---> [Your Devices]                                      |
     |        |                                                                |
     |        v                                                                |
-    |   [Traefik :80] ----+---- [code-server]     code.internal               |
-    |     (internal)      |                                                   |
-    |                     +---- [Open WebUI]      ai.internal                 |
-    |                     |                                                   |
-    |                     +---- [Ollama API]      ollama.internal             |
-    |                     |                                                   |
-    |                     +---- [Traefik Dashboard] traefik.internal          |
+    |   [Traefik :80] ----+---- [Open WebUI]      ai.internal                 |
+    |        |            |                                                   |
+    |        |            +---- [Ollama API]      ollama.internal             |
+    |        |            |                                                   |
+    |        |            +---- [Traefik Dashboard] traefik.internal (auth)   |
+    |        |                                                                |
+    |        +---> [Docker Socket Proxy] ---> /var/run/docker.sock            |
+    |              (internal network, read-only API access)                   |
     |                                                                         |
     |   [Exegol Container] <---> [HTB/THM VPN]                                |
-    |        (on-demand, host network)                                        |
+    |        (on-demand, specific capabilities - not privileged)              |
+    |                                                                         |
+    |   [AI Dev Stack] - Claude Code, OpenCode, Goose, LLM, Fabric            |
+    |        (native CLI tools for AI-assisted development)                   |
     |                                                                         |
     +-------------------------------------------------------------------------+
 ```
@@ -74,34 +94,52 @@ Edit these variables in `setup.sh` before running:
 NEW_USER="dev"                          # Username to create
 USER_EMAIL="admin@example.com"          # Email for Let's Encrypt (future use)
 SSH_PORT="5522"                         # SSH port (default: 5522)
-SSH_PUBLIC_KEY="ssh-ed25519 AAAA..."    # Your public key
 DOMAIN="example.com"                    # Your domain (optional)
+```
+
+### SSH Public Key (REQUIRED)
+
+The script reads your SSH public key from one of these sources (in order):
+
+1. **Environment variable**: `SSH_PUBLIC_KEY="ssh-ed25519 AAAA..."`
+2. **File**: `~/.ssh/devbox_authorized_key` or `/root/.ssh/devbox_authorized_key`
+3. **Manual**: Add key to `~/.ssh/authorized_keys` after setup
+
+**Recommended approach**:
+```bash
+# Option 1: Set environment variable before running
+export SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)"
+./setup.sh
+
+# Option 2: Create key file on server before running
+echo "ssh-ed25519 AAAA..." > /root/.ssh/devbox_authorized_key
+./setup.sh
 ```
 
 ## What Gets Installed
 
-| Component | Purpose |
-|-----------|---------|
-| User with sudo | Non-root user with passwordless sudo |
-| SSH hardening | Non-standard port, key-only auth, root disabled |
-| UFW firewall | Default deny, SSH only |
-| Tailscale | Zero-trust mesh VPN |
-| Docker | Container runtime (verified, not installed) |
-| Traefik v3.6 | Internal reverse proxy with label-based routing |
-| Ollama | Local LLM inference server |
-| Open WebUI | Chat interface for Ollama |
-| code-server | VS Code in browser |
-| Claude Code | CLI tool for AI-assisted coding (installer provided) |
-| OpenCode | Open-source multi-provider AI coding (installer provided) |
-| Goose | Block's AI coding agent (installer provided) |
-| LLM | Datasette CLI for LLMs (installer provided) |
-| Fabric | AI prompts framework (installer provided) |
-| mise | Polyglot version manager (node, python, go, etc.) |
-| lazygit | Terminal UI for git |
-| lazydocker | Terminal UI for Docker |
-| lazyvim | Neovim distribution with IDE features |
-| Oh-My-Zsh | Shell configuration with aliases |
-| Exegol | Pentest container (pulled on first use) |
+| Component | Version | Purpose |
+|-----------|---------|---------|
+| User with sudo | - | Non-root user with passwordless sudo |
+| SSH hardening | - | Non-standard port, key-only auth, root disabled |
+| UFW firewall | - | Default deny, SSH only |
+| Tailscale | Latest | Zero-trust mesh VPN |
+| Docker | Pre-installed | Container runtime (verified, not installed) |
+| Docker Socket Proxy | 0.3.0 | Secure Docker API access for Traefik |
+| Traefik | Latest | Internal reverse proxy with label-based routing |
+| Ollama | Latest | Local LLM inference server |
+| Open WebUI | Latest | Chat interface for Ollama (requires CHOWN, DAC_OVERRIDE, FOWNER caps) |
+| Claude Code | Latest | CLI tool for AI-assisted coding (installer provided) |
+| OpenCode | Latest | Open-source multi-provider AI coding (installer provided) |
+| Goose | Latest | Block's AI coding agent (installer provided) |
+| LLM | Latest | Datasette CLI for LLMs (installer provided) |
+| Fabric | Latest | AI prompts framework (installer provided) |
+| mise | Latest | Polyglot version manager (node, python, go, etc.) |
+| lazygit | Latest | Terminal UI for git |
+| lazydocker | Latest | Terminal UI for Docker |
+| lazyvim | Latest | Neovim distribution with IDE features |
+| Oh-My-Zsh | Latest | Shell configuration with aliases |
+| Exegol | full | Pentest container (pulled on first use) |
 
 ## Post-Installation
 
@@ -133,7 +171,7 @@ cd ~/docker
 Add to `/etc/hosts` on your local machine:
 
 ```
-TAILSCALE_IP  code.internal ai.internal traefik.internal ollama.internal
+TAILSCALE_IP  ai.internal traefik.internal ollama.internal
 ```
 
 Replace `TAILSCALE_IP` with your server's Tailscale IP (`tailscale ip -4`).
@@ -171,6 +209,15 @@ docker exec -it ollama ollama pull llama3.2
 docker exec -it ollama ollama pull codellama
 ```
 
+### 7. Verify Security Hardening
+
+```bash
+cd ~/docker
+./security-check.sh
+```
+
+This validates all security measures are in place: socket proxy, secrets management, container security options, resource limits, and health checks.
+
 ## Usage
 
 ### Service Management
@@ -179,16 +226,16 @@ docker exec -it ollama ollama pull codellama
 start-all       # Start all services
 stop-all        # Stop all services
 status          # Show service status and Tailscale info
+security-check  # Verify security hardening is in place
 ```
 
 ### Accessing Services
 
-| Service | URL |
-|---------|-----|
-| VS Code | http://code.internal |
-| Open WebUI | http://ai.internal |
-| Traefik Dashboard | http://traefik.internal |
-| Ollama API | http://ollama.internal or localhost:11434 |
+| Service | URL | Auth |
+|---------|-----|------|
+| Open WebUI | http://ai.internal | App-level (create account) |
+| Traefik Dashboard | http://traefik.internal | Basic Auth (admin/password in setup output) |
+| Ollama API | http://ollama.internal or localhost:11434 | None |
 
 ### HTB/Pentest Workflow
 
@@ -250,19 +297,24 @@ tsdown          # Disconnect Tailscale
 
 ```
 ~/
+├── .devbox-credentials               # Generated credentials (600 perms, DELETE after saving!)
 ├── docker/
+│   ├── .gitignore                    # Prevents committing secrets
 │   ├── traefik/
-│   │   ├── docker-compose.yml
+│   │   ├── docker-compose.yml        # Includes docker-socket-proxy
 │   │   ├── traefik.yml
+│   │   ├── logs/                     # Traefik logs with rotation
 │   │   └── dynamic/
+│   │       └── dashboard-auth.yml    # BasicAuth middleware (600 perms)
 │   ├── ollama-openwebui/
-│   │   └── docker-compose.yml
-│   ├── code-server/
-│   │   └── docker-compose.yml
+│   │   ├── docker-compose.yml
+│   │   ├── .env                      # Secrets (600 permissions)
+│   │   └── .gitignore
 │   ├── exegol-workspace/
 │   ├── start-all.sh
 │   ├── stop-all.sh
 │   ├── status.sh
+│   ├── security-check.sh             # Security verification script
 │   ├── exegol-htb.sh
 │   └── htb-vpn.sh
 ├── projects/
@@ -278,20 +330,63 @@ tsdown          # Disconnect Tailscale
 - All other services are accessible only via Tailscale
 - UFW firewall configured with default deny incoming
 
+### Container Security (v2.3 Hardening)
+
+All containers are configured with defense-in-depth measures:
+
+| Security Measure | Implementation |
+|-----------------|----------------|
+| **Secrets Management** | Stored in `.env` files with 600 permissions, credentials saved to secure file |
+| **SSH Key Handling** | Keys read from env var or file, never hardcoded in script |
+| **Docker Socket Protection** | Traefik uses `docker-socket-proxy` with INFO disabled |
+| **Traefik API Security** | Dashboard protected with basicAuth, `insecure: false` |
+| **Log Rotation** | Traefik logs with maxSize/maxBackups to prevent disk exhaustion |
+| **Privilege Escalation Prevention** | All containers have `no-new-privileges:true` |
+| **Capability Dropping** | All containers have `cap_drop: ALL` with minimal `cap_add` |
+| **Resource Limits** | Memory, CPU, and PID limits on all containers |
+| **UFW Safety** | Confirmation prompt before resetting existing rules |
+| **Health Checks** | All services have health checks for monitoring |
+| **VPN File Security** | OVPN files auto-enforced to 600 permissions |
+
 ### Authentication
 
-- SSH: Key-based authentication only, password auth disabled
-- Root login: Disabled
-- code-server: Password protected (generated during setup)
-- Open WebUI: Application-level auth
+| Service | Auth Method |
+|---------|-------------|
+| SSH | Key-based only (password disabled) |
+| Root login | Disabled |
+| Open WebUI | Application-level (disable signup after admin creation) |
+| Traefik Dashboard | Basic Auth (credentials in setup output) |
+
+### Open WebUI Security Note
+
+Open WebUI requires specific Linux capabilities to write to its ChromaDB database:
+- `CHOWN` - Change file ownership
+- `DAC_OVERRIDE` - Bypass file permission checks
+- `FOWNER` - Bypass permission checks on file operations
+
+These capabilities are added back after `cap_drop: ALL` to allow proper database operations while maintaining security with `no-new-privileges:true`.
+
+### Exegol Security
+
+Exegol runs with specific capabilities instead of `--privileged` by default:
+- `NET_ADMIN`, `NET_RAW` - Network tools (nmap, etc.)
+- `SYS_PTRACE` - Debugging tools
+- `--privileged` available as opt-in flag for edge cases
 
 ### Recommendations
 
-1. Rotate the generated passwords stored in the setup output
-2. Enable MagicDNS in Tailscale admin console
-3. Configure Tailscale ACLs for multi-device access control
-4. Regularly update containers: `docker compose pull && docker compose up -d`
-5. Monitor logs: `docker logs -f traefik`
+1. **Save credentials securely** - Credentials are saved to `~/.devbox-credentials` - copy to password manager and delete
+2. **Delete credentials file** - Run `rm ~/.devbox-credentials` after saving credentials
+3. **Disable Open WebUI signup** - Edit `.env` and set `ENABLE_SIGNUP=false` after creating admin
+4. **Run security checks** - Execute `./security-check.sh` periodically
+5. **Enable MagicDNS** - In Tailscale admin console
+6. **Configure Tailscale ACLs** - For multi-device access control
+7. **Update images** - Pin to newer versions and rebuild:
+   ```bash
+   cd ~/docker/traefik && docker compose pull && docker compose up -d
+   ```
+8. **Monitor logs** - `docker logs -f traefik` or check `~/docker/traefik/logs/`
+9. **Review audit report** - See `SECURITY-TODO.md` for remaining improvements
 
 ## Idempotency
 
@@ -352,6 +447,33 @@ ip addr show tun0
 tail -f /tmp/htb-vpn.log
 ```
 
+## Using Remote Ollama with Local IDE
+
+You can use the remote Ollama instance with local IDEs like Zed or VS Code via SSH tunnel.
+
+### Quick Setup
+
+```bash
+# Create SSH tunnel (run on your local machine)
+ssh -L 11434:127.0.0.1:11434 dev@your-server -p 5522 -N
+
+# Or run in background
+ssh -L 11434:127.0.0.1:11434 dev@your-server -p 5522 -N -f
+```
+
+Then configure your IDE to use `http://localhost:11434` as the Ollama endpoint.
+
+### Recommended Models for IDE Use
+
+| Model | Best For | Notes |
+|-------|----------|-------|
+| **qwen3** | General coding, agentic tasks | Good tool support |
+| **devstral** | Code completion | Mistral's coding model |
+| **codellama** | Code completion | Stable, well-tested |
+| **deepseek-coder-v2** | Code generation | Good performance |
+
+For detailed configuration (Zed settings, persistent tunnels, troubleshooting), see **[REMOTE-IDE-OLLAMA-SETUP.md](REMOTE-IDE-OLLAMA-SETUP.md)**.
+
 ## Customization
 
 ### Adding New Services
@@ -401,10 +523,16 @@ Configure public hostnames in Cloudflare Zero Trust dashboard.
 
 MIT License. See [LICENSE](LICENSE) for details.
 
+## Additional Documentation
+
+- [REMOTE-IDE-OLLAMA-SETUP.md](REMOTE-IDE-OLLAMA-SETUP.md) - Using remote Ollama with local IDEs
+
 ## References
+
 - [Hostinger VPS](https://hostinger.fr?REFERRALCODE=gl0bal01)
 - [Tailscale Documentation](https://tailscale.com/kb/)
 - [Traefik Documentation](https://doc.traefik.io/traefik/)
+- [Docker Socket Proxy](https://github.com/Tecnativa/docker-socket-proxy)
 - [Ollama Documentation](https://ollama.ai/)
 - [Claude Code Documentation](https://docs.anthropic.com/en/docs/claude-code)
 - [OpenCode Documentation](https://github.com/opencode-ai/opencode)
@@ -412,8 +540,11 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [LLM Documentation](https://llm.datasette.io/)
 - [Fabric Documentation](https://github.com/danielmiessler/fabric)
 - [Exegol Documentation](https://exegol.readthedocs.io/)
-- [code-server Documentation](https://coder.com/docs/code-server/)
 - [LazyVim Documentation](https://www.lazyvim.org/)
 - [lazygit Documentation](https://github.com/jesseduffield/lazygit)
 - [lazydocker Documentation](https://github.com/jesseduffield/lazydocker)
 - [mise Documentation](https://mise.jdx.dev/)
+
+---
+
+*Last updated: 2026-01-12 (v2.3 Security Hardened)*
