@@ -1,15 +1,16 @@
-# DevBox Quick Reference Card
+# DevBox Quick Reference
+
+A command reference for daily DevBox operations.
 
 ## SSH Access
+
 ```bash
-# Standard (replace with your IP)
+# Standard connection
 ssh -p 5522 dev@YOUR_SERVER_IP
 
 # Via Tailscale (after MagicDNS enabled)
 ssh dev@devbox
 ```
-
----
 
 ## Service Management
 
@@ -17,53 +18,46 @@ ssh dev@devbox
 # Start all services
 start-all
 
-# Stop all services  
+# Stop all services
 stop-all
 
 # Check status
 status
 
-# Or manually
+# Manual control
 cd ~/docker
 docker compose -f traefik/docker-compose.yml up -d
 docker compose -f ollama-openwebui/docker-compose.yml up -d
 ```
 
----
+## Service URLs
 
-## Access Services
+Add to `/etc/hosts` on your laptop:
 
-### Setup /etc/hosts on your LAPTOP:
-```bash
-# Get your Tailscale IP
-tailscale ip -4
-
-# Add to /etc/hosts on your laptop:
-100.x.x.x  ai.internal traefik.internal ollama.internal
+```
+TAILSCALE_IP  ai.internal traefik.internal ollama.internal
 ```
 
-### URLs:
+Get your Tailscale IP: `tailscale ip -4`
+
 | Service | URL | Notes |
 |---------|-----|-------|
 | Open WebUI | http://ai.internal | Chat with Ollama models |
 | Traefik | http://traefik.internal | Dashboard (Basic Auth) |
 | Ollama API | http://ollama.internal | Or localhost:11434 |
 
----
-
-## Ollama
+## Ollama Commands
 
 ```bash
 # Pull models
 docker exec -it ollama ollama pull llama3.2
 docker exec -it ollama ollama pull codellama
 docker exec -it ollama ollama pull mistral
-docker exec -it ollama ollama pull deepseek-coder
 
 # List models
 docker exec -it ollama ollama list
 
-# Run model directly
+# Run model
 docker exec -it ollama ollama run llama3.2
 
 # API test
@@ -73,69 +67,59 @@ curl http://localhost:11434/api/generate -d '{
 }'
 ```
 
----
-
-## Ai Dev Stack
+## AI Dev Stack
 
 ```bash
 # Interactive menu
 ./install-ai-dev-stack.sh
+
+# After installation
+claude login                     # Claude Code
+goose configure                  # Goose
+llm keys set openai              # LLM
+fabric --setup                   # Fabric
+export ANTHROPIC_API_KEY=...     # OpenCode
 ```
 
-After installation:
-```bash
-claude login                     # Authenticate Claude Code
-goose configure                  # Configure Goose
-llm keys set openai              # Set OpenAI key for LLM
-fabric --setup                   # Configure Fabric
-export ANTHROPIC_API_KEY=...     # Set key for OpenCode
-```
-
----
-
-## HTB / Pentest Workflow
+## Penetration Testing
 
 ```bash
-# 1. Connect to HTB VPN
+# Connect to HTB VPN
 htb-vpn ~/htb/starting-point.ovpn
 
 # Check VPN status
 htb-vpn status
 
-# 2. Start Exegol
+# Start Exegol
 exegol
 
 # Or with custom name
 ./docker/exegol-htb.sh my-session
 
-# 3. Inside Exegol - you have full HTB access
+# Inside Exegol
 nmap -sC -sV 10.10.10.x
 gobuster dir -u http://target -w /wordlists/...
 msfconsole
 
-# 4. Disconnect VPN when done
+# Disconnect VPN
 htb-vpn stop
 ```
-
----
 
 ## Tailscale Commands
 
 ```bash
-tailscale status        # Check connection & peers
+tailscale status        # Check connection and peers
 tailscale ip -4         # Show your Tailscale IP
 sudo tailscale up       # Connect
 sudo tailscale down     # Disconnect
 tailscale ping devbox   # Test connectivity
 ```
 
----
-
 ## Docker Shortcuts
 
 ```bash
 dps                      # List running containers (formatted)
-dpsa                     # List ALL containers
+dpsa                     # List all containers
 dlog container-name      # Follow logs
 dex container-name bash  # Exec into container
 dc up -d                 # docker compose up -d
@@ -145,22 +129,21 @@ dprune                   # Clean up unused resources
 lzd                      # lazydocker TUI
 ```
 
----
-
-## Lazy Tools
+## Git Shortcuts
 
 ```bash
-# lazygit - Terminal UI for git
-lg                       # or: lazygit
-
-# lazydocker - Terminal UI for Docker
-lzd                      # or: lazydocker
-
-# lazyvim - Neovim IDE
-vim                      # or: nvim
+lg                       # lazygit TUI
+gs                       # git status
+gp                       # git pull
+gP                       # git push
 ```
 
----
+## Editor
+
+```bash
+vim                      # neovim (lazyvim)
+vi                       # neovim (lazyvim)
+```
 
 ## Directory Structure
 
@@ -168,12 +151,7 @@ vim                      # or: nvim
 ~/
 ├── docker/
 │   ├── traefik/              # Reverse proxy + socket proxy
-│   │   ├── docker-compose.yml
-│   │   ├── traefik.yml
-│   │   └── dynamic/
-│   ├── ollama-openwebui/     # AI stack (Ollama + Open WebUI)
-│   │   ├── docker-compose.yml
-│   │   └── .env
+│   ├── ollama-openwebui/     # AI stack
 │   ├── exegol-workspace/     # Pentest workspace
 │   ├── start-all.sh
 │   ├── stop-all.sh
@@ -181,12 +159,10 @@ vim                      # or: nvim
 │   ├── security-check.sh
 │   ├── exegol-htb.sh
 │   └── htb-vpn.sh
-├── projects/                 # Your code projects
+├── projects/                 # Code projects
 ├── htb/                      # HTB OVPN files
 └── install-ai-dev-stack.sh   # AI Dev Stack installer
 ```
-
----
 
 ## Security Notes
 
@@ -196,35 +172,7 @@ vim                      # or: nvim
 - All services via **Tailscale only**
 - UFW firewall **active**
 
----
-
-## Troubleshooting
-
-```bash
-# Services not starting?
-docker ps -a                      # Check container status
-docker logs traefik               # Check logs
-
-# Can't connect via Tailscale?
-tailscale status                  # Check if connected
-sudo systemctl status tailscaled  # Check daemon
-
-# Firewall issues?
-sudo ufw status                   # Check rules
-
-# SSH not working?
-sudo sshd -t                      # Test config
-sudo systemctl status sshd        # Check service
-journalctl -u sshd -f            # SSH logs
-
-# DNS not resolving?
-cat /etc/hosts                    # Check local hosts
-ping ai.internal                  # Test resolution
-```
-
----
-
-## Useful One-Liners
+## Common Tasks
 
 ```bash
 # Restart all services
@@ -236,9 +184,13 @@ docker compose pull && docker compose up -d
 # Check resource usage
 docker stats
 
-# Quick backup of docker configs
+# Quick backup
 tar -czvf ~/docker-backup-$(date +%Y%m%d).tar.gz ~/docker/
 
-# Watch logs from all containers
+# Watch all logs
 docker logs -f traefik & docker logs -f ollama & docker logs -f open-webui
 ```
+
+---
+
+*Last updated: 2026-01-13*

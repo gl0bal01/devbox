@@ -1,0 +1,76 @@
+# Remote Ollama Configuration
+# Copy this to your ~/.bashrc or ~/.zshrc on your laptop
+#
+# Location: scripts/laptop/shell-config.txt
+#
+# USAGE:
+#   1. Set your server's Tailscale IP:
+#      export OLLAMA_SERVER_IP="100.x.x.x"
+#   2. Copy this entire block to your shell config
+#   3. Reload: source ~/.bashrc
+#
+# Find Tailscale IP:
+#   ssh your-server "tailscale ip -4"
+
+export OLLAMA_SERVER_IP="${OLLAMA_SERVER_IP:-100.x.x.x}"  # Replace with your IP
+export OLLAMA_HOST="http://${OLLAMA_SERVER_IP}:11434"
+
+# Quick ask - get just the answer
+ask() {
+    if [ -z "$1" ]; then
+        echo "Usage: ask \"your question here\""
+        return 1
+    fi
+
+    local prompt="$*"
+    curl -s "$OLLAMA_HOST/api/generate" -d "{
+        \"model\": \"qwen3\",
+        \"prompt\": \"$prompt\",
+        \"stream\": false
+    }" | jq -r '.response'
+}
+
+# Code-specific questions
+askcode() {
+    if [ -z "$1" ]; then
+        echo "Usage: askcode \"your code question\""
+        return 1
+    fi
+
+    local prompt="You are a coding assistant. Answer concisely with code when appropriate. Question: $*"
+    curl -s "$OLLAMA_HOST/api/generate" -d "{
+        \"model\": \"qwen3\",
+        \"prompt\": \"$prompt\",
+        \"stream\": false
+    }" | jq -r '.response'
+}
+
+# Chat with streaming (see responses in real-time)
+chat() {
+    if [ -z "$1" ]; then
+        echo "Usage: chat \"your question\""
+        return 1
+    fi
+
+    local prompt="$*"
+    curl -s "$OLLAMA_HOST/api/generate" -d "{
+        \"model\": \"qwen3\",
+        \"prompt\": \"$prompt\",
+        \"stream\": true
+    }" | while IFS= read -r line; do
+        echo "$line" | jq -r '.response // empty' | tr -d '\n'
+    done
+    echo ""
+}
+
+# List remote models
+alias ollamals='curl -s $OLLAMA_HOST/api/tags | jq -r ".models[].name"'
+
+# Short aliases
+alias ai='ask'
+
+# Usage examples:
+# ask "What is Python?"
+# askcode "Write hello world in Python"
+# chat "Explain Docker"
+# ai "translate 'hello' to French"

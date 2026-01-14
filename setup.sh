@@ -784,6 +784,14 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    # Optimized for KVM8
+    #environment:
+    #  - OLLAMA_HOST=0.0.0.0:11434
+    #  - OLLAMA_NUM_PARALLEL=2
+    #  - OLLAMA_MAX_LOADED_MODELS=1
+    #  - OLLAMA_KEEP_ALIVE=24h
+    #  - OLLAMA_NUM_THREADS=8
+    #  - OLLAMA_FLASH_ATTENTION=1
     # SECURITY: Security hardening
     security_opt:
       - no-new-privileges:true
@@ -797,6 +805,7 @@ services:
     volumes:
       - ./ollama-data:/root/.ollama
     ports:
+      # - "${TS_IP}:11434:11434"    # Tailscale only - secure remote access
       - "127.0.0.1:11434:11434"    # Localhost only for Claude Code
     networks:
       - proxy-net
@@ -805,10 +814,10 @@ services:
       - "traefik.http.routers.ollama-api.rule=Host(`ollama.internal`)"
       - "traefik.http.services.ollama-api.loadbalancer.server.port=11434"
     # SECURITY: Resource limits
-    # Adjust mem_limit based on your models (llama3.2 needs ~4GB, larger models need more)
+    # KVM8 conf - Adjust mem_limit based on your models (llama3.2 needs ~4GB, larger models need more)
     mem_limit: 24g
-    memswap_limit: 24g
-    cpus: 4
+    memswap_limit: 28g
+    cpus: 7
     pids_limit: 200
     healthcheck:
       test: ["CMD", "ollama", "list"]
@@ -859,7 +868,7 @@ services:
       - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
     # SECURITY: Resource limits
     mem_limit: 2g
-    memswap_limit: 2g
+    memswap_limit: 4g
     cpus: 1
     pids_limit: 200
     healthcheck:
@@ -1341,7 +1350,7 @@ install_goose() {
 
 install_llm() {
     info "Installing/updating LLM..."
-    
+
     # Ensure pipx is installed
     if ! command -v pipx &>/dev/null; then
         info "Installing pipx first..."
@@ -1349,13 +1358,13 @@ install_llm() {
         pipx ensurepath
         export PATH="$HOME/.local/bin:$PATH"
     fi
-    
+
     if command -v llm &>/dev/null; then
         pipx upgrade llm 2>/dev/null || pipx install llm --force
     else
         pipx install llm
     fi
-    
+
     log "LLM installed/updated"
     echo "    Run: llm keys set openai"
     echo "    Docs: https://llm.datasette.io"
@@ -1387,32 +1396,32 @@ install_all() {
 update_all() {
     info "Updating all installed tools..."
     echo ""
-    
+
     if command -v claude &>/dev/null; then
         install_claude
         echo ""
     fi
-    
+
     if command -v opencode &>/dev/null; then
         install_opencode
         echo ""
     fi
-    
+
     if command -v goose &>/dev/null; then
         install_goose
         echo ""
     fi
-    
+
     if command -v llm &>/dev/null; then
         install_llm
         echo ""
     fi
-    
+
     if command -v fabric &>/dev/null; then
         install_fabric
         echo ""
     fi
-    
+
     log "All installed tools updated!"
 }
 
@@ -1420,31 +1429,31 @@ show_status() {
     echo ""
     echo -e "${CYAN}AI Dev Stack Status${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    
+
     if command -v claude &>/dev/null; then
         echo -e "Claude Code:  ${GREEN}installed${NC} ($(which claude))"
     else
         echo -e "Claude Code:  ${RED}not installed${NC}"
     fi
-    
+
     if command -v opencode &>/dev/null; then
         echo -e "OpenCode:     ${GREEN}installed${NC} ($(which opencode))"
     else
         echo -e "OpenCode:     ${RED}not installed${NC}"
     fi
-    
+
     if command -v goose &>/dev/null; then
         echo -e "Goose:        ${GREEN}installed${NC} ($(which goose))"
     else
         echo -e "Goose:        ${RED}not installed${NC}"
     fi
-    
+
     if command -v llm &>/dev/null; then
         echo -e "LLM:          ${GREEN}installed${NC} ($(which llm))"
     else
         echo -e "LLM:          ${RED}not installed${NC}"
     fi
-    
+
     if command -v fabric &>/dev/null; then
         echo -e "Fabric:       ${GREEN}installed${NC} ($(which fabric))"
     else
@@ -1477,7 +1486,7 @@ interactive_menu() {
     while true; do
         show_menu
         read -r choice
-        
+
         case $choice in
             1) echo ""; install_claude ;;
             2) echo ""; install_opencode ;;
@@ -1490,7 +1499,7 @@ interactive_menu() {
             q|Q) echo ""; exit 0 ;;
             *) warn "Invalid option" ;;
         esac
-        
+
         echo ""
         echo -n "Press Enter to continue..."
         read -r
@@ -1534,7 +1543,7 @@ else
         --help|-h)  show_help ;;
         *)          error "Unknown option: $1. Use --help for usage." ;;
     esac
-    
+
     # Reload shell config to update PATH
     echo ""
     info "Reloading shell to update PATH..."
