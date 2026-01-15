@@ -544,6 +544,50 @@ else
 fi
 
 # =============================================================================
+# PHASE 7c: Development Runtimes (Rust, Bun, Zellij)
+# =============================================================================
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}PHASE 7c: Development Runtimes (Rust, Bun, Zellij)${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Rust/Cargo
+if su - "${NEW_USER}" -c 'command -v cargo' &>/dev/null; then
+  log "Rust/Cargo already installed"
+else
+  info "Installing Rust/Cargo for ${NEW_USER}..."
+  su - "${NEW_USER}" -c 'curl https://sh.rustup.rs -sSf | sh -s -- -y'
+  log "Rust/Cargo installed"
+fi
+
+# cargo-binstall (for faster binary installs)
+if su - "${NEW_USER}" -c 'source ~/.cargo/env && command -v cargo-binstall' &>/dev/null; then
+  log "cargo-binstall already installed"
+else
+  info "Installing cargo-binstall..."
+  su - "${NEW_USER}" -c 'source ~/.cargo/env && cargo install cargo-binstall'
+  log "cargo-binstall installed"
+fi
+
+# Zellij (terminal multiplexer)
+if su - "${NEW_USER}" -c 'source ~/.cargo/env && command -v zellij' &>/dev/null; then
+  log "zellij already installed"
+else
+  info "Installing zellij..."
+  su - "${NEW_USER}" -c 'source ~/.cargo/env && cargo binstall zellij -y'
+  log "zellij installed"
+fi
+
+# Bun (JavaScript runtime)
+if su - "${NEW_USER}" -c 'command -v bun' &>/dev/null; then
+  log "Bun already installed"
+else
+  info "Installing Bun for ${NEW_USER}..."
+  su - "${NEW_USER}" -c 'curl -fsSL https://bun.sh/install | bash'
+  log "Bun installed"
+fi
+
+# =============================================================================
 # PHASE 8: Docker Stack
 # =============================================================================
 echo ""
@@ -1614,6 +1658,13 @@ if command -v mise &>/dev/null; then
     eval "$(mise activate zsh)"
 fi
 
+# ─── Rust/Cargo ───────────────────────────────────────────────────────────────
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+
+# ─── Bun ──────────────────────────────────────────────────────────────────────
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
 # ─── Docker Aliases ──────────────────────────────────────────────────────────
 alias d="docker"
 alias dc="docker compose"
@@ -1622,6 +1673,17 @@ alias dpsa="docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 alias dlog="docker logs -f"
 alias dex="docker exec -it"
 alias dprune="docker system prune -af"
+
+# ─── Ollama ─────────────────────────────────────────────────────────────────
+# Core ollama commands with docker
+alias ollama='docker exec -it ollama ollama'
+alias olist='docker exec -it ollama ollama list'
+alias opull='docker exec -it ollama ollama pull'
+alias orm='docker exec -it ollama ollama rm'
+alias oshow='docker exec -it ollama ollama show'
+alias ocopy='docker exec -it ollama ollama cp'
+alias ollama-health='docker exec -it ollama curl -s http://localhost:11434/api/tags | jq .'
+alias ollama-ps='docker ps -f "name=ollama" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 
 # ─── Git Aliases ─────────────────────────────────────────────────────────────
 alias lg="lazygit"
@@ -1632,6 +1694,13 @@ alias gP="git push"
 # ─── Editor ──────────────────────────────────────────────────────────────────
 alias vim="nvim"
 alias vi="nvim"
+
+# ─── Terminal Multiplexer ─────────────────────────────────────────────────────
+alias zj="zellij"
+
+# ─── Claude ─────
+alias cc="claude -c"
+alias ccd="claude -c --dangerously-skip-permissions"
 
 # ─── DevBox Shortcuts ────────────────────────────────────────────────────────
 alias start-all="~/docker/start-all.sh"
@@ -1661,6 +1730,7 @@ alias s="cd .."
 alias ..="cd .."
 alias ...="cd ../.."
 alias grep="grep --color=auto"
+alias cheat='f(){ curl -s "cheat.sh/$1";  unset -f f; }; f'
 
 # ─── History ─────────────────────────────────────────────────────────────────
 HISTSIZE=10000
