@@ -274,6 +274,16 @@ htb-vpn status
 # Launch Exegol with host network
 exegol
 
+# Remote desktop access (noVNC in browser)
+exegol-remote                              # Default port 45377
+exegol-remote osint-box --port 45378       # Multiple containers
+
+# Setup VNC for existing container
+exegol-vnc my-container 45377
+
+# Access at: http://exegol.internal:45377/vnc.html
+# See docs/exegol.md for multi-container use cases
+
 # Disconnect VPN
 htb-vpn stop
 ```
@@ -377,6 +387,7 @@ For more troubleshooting scenarios, see [Troubleshooting Guide](docs/troubleshoo
 | Document | Description |
 |----------|-------------|
 | [Quick Reference](docs/quick-reference.md) | Command cheat sheet |
+| [Exegol Guide](docs/exegol.md) | Multi-container pentest workflows |
 | [Ollama Optimization](docs/ollama-optimization.md) | Performance tuning for Ollama |
 | [Remote IDE Setup](docs/remote-ide-setup.md) | Configure local IDE with remote Ollama |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
@@ -392,6 +403,7 @@ devbox/
 ├── setup.sh                     # Main setup script (run on server)
 ├── docs/
 │   ├── quick-reference.md       # Command cheat sheet
+│   ├── exegol.md                # Multi-container Exegol guide
 │   ├── ollama-optimization.md   # Ollama performance tuning
 │   ├── remote-ide-setup.md      # IDE configuration guide
 │   └── troubleshooting.md       # Common issues
@@ -417,7 +429,11 @@ devbox/
 │   ├── start-all.sh
 │   ├── stop-all.sh
 │   ├── status.sh
-│   └── security-check.sh
+│   ├── security-check.sh
+│   ├── exegol-htb.sh
+│   ├── exegol-remote.sh
+│   ├── exegol-vnc.sh
+│   └── htb-vpn.sh
 ├── projects/                    # Your code projects
 ├── htb/                         # HTB OVPN files
 └── install-ai-dev-stack.sh      # AI Dev Stack installer
@@ -447,4 +463,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-*Last updated: 2026-01-13 (v2.3 Security Hardened)*
+*Last updated: 2026-02-05 (v2.4 Exegol vnc remote through tailscale)*

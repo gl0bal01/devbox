@@ -93,8 +93,15 @@ htb-vpn status
 # Start Exegol
 exegol
 
-# Or with custom name
-./docker/exegol-htb.sh my-session
+# Remote desktop access (browser-based)
+exegol-remote                              # Default: exegol-htb on port 45377
+exegol-remote osint-box --port 45378       # Multiple containers on different ports
+
+# Setup VNC for running container
+exegol-vnc my-container 45377
+
+# Access: http://exegol.internal:45377/vnc.html
+# See docs/exegol.md for multi-container workflows
 
 # Inside Exegol
 nmap -sC -sV 10.10.10.x
@@ -158,7 +165,12 @@ vi                       # neovim (lazyvim)
 │   ├── status.sh
 │   ├── security-check.sh
 │   ├── exegol-htb.sh
+│   ├── exegol-remote.sh
+│   ├── exegol-vnc.sh
 │   └── htb-vpn.sh
+├── devbox/
+│   └── docs/
+│       └── exegol.md            # Multi-container Exegol guide
 ├── projects/                 # Code projects
 ├── htb/                      # HTB OVPN files
 └── install-ai-dev-stack.sh   # AI Dev Stack installer
