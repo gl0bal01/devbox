@@ -22,34 +22,40 @@ DevBox transforms a fresh Ubuntu 24.04 VPS into a fully configured development e
 
 ### Architecture
 
+Two access paths are supported:
+
+**Path A — Tailscale-only (default)**: All services on port 80, bound to Tailscale IP. No domain or certificates needed. HTTP over WireGuard is already encrypted.
+
+**Path B — Public HTTPS (opt-in)**: Add ports 80+443 bound to 0.0.0.0, Let's Encrypt wildcard cert via OVH DNS-01. Requires `ENABLE_HTTPS=true` + a domain + OVH API credentials.
+
 ```
-                                [Internet]
-                                     |
-                                [Firewall]
-                                Port 5522 only
-                                     |
-+------------------------------------+------------------------------------+
-|                                   VPS                                   |
-|                                                                         |
-|   [Tailscale] <---> [Your Devices]                                      |
-|        |                                                                |
-|        v                                                                |
-|   [Traefik :80] ----+---- [Open WebUI]      ai.internal                 |
-|        |            |                                                   |
-|        |            +---- [Ollama API]      ollama.internal             |
-|        |            |                                                   |
-|        |            +---- [Traefik Dashboard] traefik.internal (auth)   |
-|        |                                                                |
-|        +---> [Docker Socket Proxy] ---> /var/run/docker.sock            |
-|              (internal network, read-only API access)                   |
-|                                                                         |
-|   [Exegol Container] <---> [HTB/THM VPN]                                |
-|        (on-demand, specific capabilities)                               |
-|                                                                         |
-|   [AI Dev Stack] - Claude Code, OpenCode, Goose, LLM, Fabric            |
-|        (native CLI tools for AI-assisted development)                   |
-|                                                                         |
-+-------------------------------------------------------------------------+
+                           Path A (default)          Path B (opt-in)
+                           ────────────────           ───────────────
+[Your Devices] ──Tailscale──> [Traefik :80]    [Internet] ──> [Traefik :443]
+                                    |                                |
+                  (Tailscale IP)    |              (0.0.0.0, TLS)   |
+                                    v                                v
++---------------------------[VPS]-------------------------------------------+
+|                                                                           |
+|   [Tailscale] <──> [Your Devices]     [Internet (optional, HTTPS only)]   |
+|        |                                                                  |
+|        v                                                                  |
+|   [Traefik] ──────+──── [Open WebUI]    ai.internal / ai.DOMAIN           |
+|        |          |                                                       |
+|        |          +──── [Ollama API]    ollama.internal                   |
+|        |          |                                                       |
+|        |          +──── [Traefik Dashboard] traefik.internal (auth)       |
+|        |                                                                  |
+|        +──> [Docker Socket Proxy] ──> /var/run/docker.sock                |
+|             (internal network, read-only API access)                      |
+|                                                                           |
+|   [Exegol Container] <──> [HTB/THM VPN]                                   |
+|        (on-demand, specific capabilities)                                 |
+|                                                                           |
+|   [AI Dev Stack] - Claude Code, OpenCode, Goose, LLM, Fabric             |
+|        (native CLI tools for AI-assisted development)                     |
+|                                                                           |
++---------------------------------------------------------------------------+
 ```
 
 ## Features
@@ -82,7 +88,7 @@ DevBox transforms a fresh Ubuntu 24.04 VPS into a fully configured development e
 - **lazyvim**: Neovim distribution with IDE features
 - **Oh-My-Zsh**: Shell configuration with aliases
 
-### Security Hardening (v2.3)
+### Security Hardening (v2.5)
 
 - Secrets stored in `.env` files with 600 permissions
 - Docker socket proxy prevents container escape
@@ -90,6 +96,7 @@ DevBox transforms a fresh Ubuntu 24.04 VPS into a fully configured development e
 - Traefik dashboard protected with basic authentication
 - Resource limits on all containers
 - Health checks on all services
+- Traefik bound to Tailscale IP (port 80/443 not reachable from LAN)
 
 ## Requirements
 
@@ -120,10 +127,24 @@ Edit these variables in `setup.sh` before running:
 
 ```bash
 NEW_USER="dev"                    # Username to create
-USER_EMAIL="admin@example.com"    # Email for Let's Encrypt (future use)
+USER_EMAIL="admin@example.com"    # Email for Let's Encrypt
 SSH_PORT="5522"                   # SSH port (default: 5522)
-DOMAIN="example.com"              # Your domain (optional)
+DOMAIN="example.com"              # Your domain (used when ENABLE_HTTPS=true)
+
+# Tailscale-only access (default, no domain needed)
+ENABLE_HTTPS=false
+
+# Public HTTPS via OVH DNS-01 (only needed when ENABLE_HTTPS=true)
+# See docs/https-setup.md for how to create these credentials
+OVH_ENDPOINT="ovh-eu"
+OVH_APPLICATION_KEY="REPLACE_ME"
+OVH_APPLICATION_SECRET="REPLACE_ME"
+OVH_CONSUMER_KEY="REPLACE_ME"
 ```
+
+> **Default setup (Tailscale-only)**: Leave `ENABLE_HTTPS=false`. Services are accessible at `.internal` hostnames over Tailscale — HTTP over WireGuard is already encrypted.
+>
+> **Want public HTTPS?** Set `ENABLE_HTTPS=true`, set your `DOMAIN`, and fill in OVH credentials. See [Adding Public HTTPS](docs/https-setup.md).
 
 ### SSH Public Key (Required)
 
@@ -217,6 +238,8 @@ cd ~/docker
 ./security-check.sh
 ```
 
+> **Want public HTTPS?** After the basic setup works, follow [docs/https-setup.md](docs/https-setup.md) to add Let's Encrypt wildcard certs via OVH DNS-01.
+
 ## Usage
 
 ### Service Management
@@ -230,11 +253,16 @@ security-check  # Verify security hardening
 
 ### Accessing Services
 
-| Service | URL | Authentication |
-|---------|-----|----------------|
-| Open WebUI | http://ai.internal | App-level (create account) |
-| Traefik Dashboard | http://traefik.internal | Basic Auth |
-| Ollama API | http://ollama.internal | None |
+| Service | URL (default) | URL (ENABLE_HTTPS=true) |
+|---------|---------------|------------------------|
+| Open WebUI | http://ai.internal | https://ai.DOMAIN |
+| Traefik Dashboard | http://traefik.internal | http://traefik.internal |
+| Ollama API | http://ollama.internal | http://ollama.internal |
+
+All `.internal` URLs require Tailscale. Add to `/etc/hosts` on your laptop:
+```
+TAILSCALE_IP  ai.internal traefik.internal ollama.internal
+```
 
 ### Remote IDE Integration
 
@@ -326,6 +354,8 @@ tsdown          # Disconnect Tailscale
 - Only SSH (port 5522) is exposed to the public internet
 - All other services are accessible only via Tailscale
 - UFW firewall configured with default deny incoming
+- Traefik ports 80/443 bound to Tailscale IP — inaccessible from LAN by design
+- HTTP over Tailscale (WireGuard) is already encrypted — HTTPS optional for public access
 
 ### Container Security
 
@@ -387,6 +417,7 @@ For more troubleshooting scenarios, see [Troubleshooting Guide](docs/troubleshoo
 | Document | Description |
 |----------|-------------|
 | [Quick Reference](docs/quick-reference.md) | Command cheat sheet |
+| [HTTPS Setup](docs/https-setup.md) | Enable public HTTPS with OVH DNS-01 |
 | [Exegol Guide](docs/exegol.md) | Multi-container pentest workflows |
 | [Ollama Optimization](docs/ollama-optimization.md) | Performance tuning for Ollama |
 | [Remote IDE Setup](docs/remote-ide-setup.md) | Configure local IDE with remote Ollama |
@@ -403,6 +434,7 @@ devbox/
 ├── setup.sh                     # Main setup script (run on server)
 ├── docs/
 │   ├── quick-reference.md       # Command cheat sheet
+│   ├── https-setup.md           # Enable public HTTPS with OVH DNS-01
 │   ├── exegol.md                # Multi-container Exegol guide
 │   ├── ollama-optimization.md   # Ollama performance tuning
 │   ├── remote-ide-setup.md      # IDE configuration guide

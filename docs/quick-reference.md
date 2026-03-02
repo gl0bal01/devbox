@@ -46,6 +46,10 @@ Get your Tailscale IP: `tailscale ip -4`
 | Traefik | http://traefik.internal | Dashboard (Basic Auth) |
 | Ollama API | http://ollama.internal | Or localhost:11434 |
 
+<!-- If ENABLE_HTTPS=true, also accessible at:
+| Open WebUI | https://ai.DOMAIN | Let's Encrypt cert via OVH DNS-01 |
+-->
+
 ## Ollama Commands
 
 ```bash
@@ -203,6 +207,22 @@ tar -czvf ~/docker-backup-$(date +%Y%m%d).tar.gz ~/docker/
 docker logs -f traefik & docker logs -f ollama & docker logs -f open-webui
 ```
 
+## TLS / HTTPS (when ENABLE_HTTPS=true)
+
+```bash
+# Check cert issuance status
+docker logs traefik 2>&1 | grep -i "acme\|cert\|tls"
+
+# Count certificates in acme.json (requires jq)
+docker exec traefik cat /letsencrypt/acme.json | jq '.letsencrypt.Certificates | length'
+
+# Watch Traefik router list
+curl -s http://traefik.internal/api/http/routers | jq '.[].name'
+
+# Restart Traefik to re-attempt cert issuance
+cd ~/docker/traefik && docker compose restart traefik
+```
+
 ---
 
-*Last updated: 2026-01-13*
+*Last updated: 2026-03-02*

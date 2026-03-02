@@ -115,6 +115,12 @@ curl -H "Host: ai.internal" http://localhost
    cat /etc/hosts | grep internal
    ```
 
+4. **Tailscale port binding**: Ports 80 and 443 are bound to the Tailscale IP — they are intentionally inaccessible from LAN or the public internet. You must connect via Tailscale to reach services. Verify:
+   ```bash
+   ss -tlnp | grep ':80\|:443'   # Should show TAILSCALE_IP, not 0.0.0.0
+   tailscale status               # Verify Tailscale is connected
+   ```
+
 ### Container Won't Start
 
 **Diagnosis**:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DEVBOX FULL SETUP SCRIPT v2.3 (Security Hardened)
+# DEVBOX FULL SETUP SCRIPT v2.5 (HTTPS + Security Hardened)
 # =============================================================================
 # Remote Dev/Pentest/AI Station - Production Ready
 #
@@ -66,8 +66,19 @@ fi
 # Passwords for services (auto-generated if empty)
 OPENWEBUI_SECRET="" # Leave empty to auto-generate
 
-# Domain (for future Cloudflare Tunnel / public access)
+# Domain (used when ENABLE_HTTPS=true)
 DOMAIN="example.com"
+
+# Set to true + fill OVH credentials to enable Let's Encrypt HTTPS
+ENABLE_HTTPS=false
+
+# OVH DNS-01 credentials (only needed when ENABLE_HTTPS=true)
+# Create at: https://api.ovh.com/createToken/
+# Rights: GET/POST/DELETE /domain/zone/*
+OVH_ENDPOINT="ovh-eu"
+OVH_APPLICATION_KEY="REPLACE_ME"
+OVH_APPLICATION_SECRET="REPLACE_ME"
+OVH_CONSUMER_KEY="REPLACE_ME"
 
 # =============================================================================
 # DO NOT EDIT BELOW THIS LINE (unless you know what you're doing)
@@ -651,7 +662,108 @@ EOF
   # Generate password hash for Traefik basicAuth (uses pre-generated TRAEFIK_PASS)
   TRAEFIK_HASH=$(openssl passwd -apr1 "${TRAEFIK_PASS}")
 
-  cat >"${DOCKER_DIR}/traefik/docker-compose.yml" <<'EOF'
+  if [[ "$ENABLE_HTTPS" == "true" ]]; then
+    cat >"${DOCKER_DIR}/traefik/docker-compose.yml" <<'EOF'
+services:
+  # SECURITY: Docker socket proxy limits API access (Critical Fix #2)
+  # Only expose read-only endpoints needed by Traefik
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      # Read-only access
+      CONTAINERS: 1
+      NETWORKS: 1
+      SERVICES: 1
+      TASKS: 1
+      # Explicitly deny write operations
+      POST: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      EXEC: 0
+      IMAGES: 0
+      # SECURITY: INFO disabled to prevent Docker daemon info exposure (HIGH-1 fix)
+      INFO: 0
+      NODES: 0
+      PLUGINS: 0
+      SECRETS: 0
+      SWARM: 0
+      SYSTEM: 0
+      VOLUMES: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-proxy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 50
+
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
+    env_file: .env
+    ports:
+      - "${TAILSCALE_IP}:80:80"
+      - "${TAILSCALE_IP}:443:443"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ./logs:/var/log/traefik
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - proxy-net
+      - socket-proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.internal`)"
+      - "traefik.http.routers.traefik.entrypoints=web"
+      - "traefik.http.routers.traefik.service=api@internal"
+      # SECURITY: Dashboard authentication
+      - "traefik.http.routers.traefik.middlewares=dashboard-auth@file"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Resource limits (High Fix #7)
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+
+networks:
+  proxy-net:
+    external: true
+  socket-proxy:
+    driver: bridge
+    internal: true
+EOF
+  else
+    cat >"${DOCKER_DIR}/traefik/docker-compose.yml" <<'EOF'
 services:
   # SECURITY: Docker socket proxy limits API access (Critical Fix #2)
   # Only expose read-only endpoints needed by Traefik
@@ -713,7 +825,7 @@ services:
     tmpfs:
       - /tmp
     ports:
-      - "80:80"      # Safe: UFW blocks public, only Tailscale can reach
+      - "${TAILSCALE_IP}:80:80"
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - ./dynamic:/etc/traefik/dynamic:ro
@@ -747,8 +859,61 @@ networks:
     driver: bridge
     internal: true
 EOF
+  fi
 
-  cat >"${DOCKER_DIR}/traefik/traefik.yml" <<'EOF'
+  if [[ "$ENABLE_HTTPS" == "true" ]]; then
+    cat >"${DOCKER_DIR}/traefik/traefik.yml" <<EOF
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+providers:
+  # SECURITY: Use socket proxy instead of direct socket access
+  docker:
+    endpoint: "tcp://docker-socket-proxy:2375"
+    exposedByDefault: false
+    network: proxy-net
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+  # SECURITY: Dashboard protected by basicAuth middleware, insecure disabled
+  insecure: false
+
+# Enable ping endpoint for health checks
+ping: {}
+
+# SECURITY: Log rotation to prevent disk exhaustion
+log:
+  level: INFO
+  filePath: /var/log/traefik/traefik.log
+  maxSize: 10
+  maxBackups: 3
+  maxAge: 7
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${USER_EMAIL}
+      storage: /letsencrypt/acme.json
+      dnsChallenge:
+        provider: ovh
+        delayBeforeCheck: 0
+EOF
+  else
+    cat >"${DOCKER_DIR}/traefik/traefik.yml" <<'EOF'
 global:
   checkNewVersion: true
   sendAnonymousUsage: false
@@ -787,6 +952,7 @@ accessLog:
   filePath: /var/log/traefik/access.log
   bufferingSize: 100
 EOF
+  fi
 
   # Dynamic config with authentication middleware
   cat >"${DOCKER_DIR}/traefik/dynamic/dashboard-auth.yml" <<EOF
@@ -801,6 +967,21 @@ EOF
 
   # SECURITY: Restrict permissions on password hash file
   chmod 600 "${DOCKER_DIR}/traefik/dynamic/dashboard-auth.yml"
+
+  # Conditional Let's Encrypt setup
+  if [[ "$ENABLE_HTTPS" == "true" ]]; then
+    mkdir -p "${DOCKER_DIR}/traefik/letsencrypt"
+    touch "${DOCKER_DIR}/traefik/letsencrypt/acme.json"
+    chmod 600 "${DOCKER_DIR}/traefik/letsencrypt/acme.json"
+    cat >"${DOCKER_DIR}/traefik/.env" <<EOF
+OVH_ENDPOINT=${OVH_ENDPOINT}
+OVH_APPLICATION_KEY=${OVH_APPLICATION_KEY}
+OVH_APPLICATION_SECRET=${OVH_APPLICATION_SECRET}
+OVH_CONSUMER_KEY=${OVH_CONSUMER_KEY}
+EOF
+    chmod 600 "${DOCKER_DIR}/traefik/.env"
+    log "Let's Encrypt (OVH DNS-01) configured"
+  fi
 
   log "Traefik configured with socket proxy and dashboard auth"
 
@@ -822,7 +1003,8 @@ EOF
   # Add .env to .gitignore
   echo ".env" >"${DOCKER_DIR}/ollama-openwebui/.gitignore"
 
-  cat >"${DOCKER_DIR}/ollama-openwebui/docker-compose.yml" <<'EOF'
+  # Write common services section (up to openwebui labels)
+  cat >"${DOCKER_DIR}/ollama-openwebui/docker-compose.yml" <<'COMPOSE_PART1'
 services:
   ollama:
     image: ollama/ollama:latest
@@ -906,10 +1088,35 @@ services:
       - ./openwebui-data:/app/backend/data
     networks:
       - proxy-net
+COMPOSE_PART1
+
+  # Write openwebui Traefik labels (conditional on ENABLE_HTTPS)
+  if [[ "$ENABLE_HTTPS" == "true" ]]; then
+    cat >>"${DOCKER_DIR}/ollama-openwebui/docker-compose.yml" <<EOF
+    labels:
+      - "traefik.enable=true"
+      # HTTP router: internal access via .internal hostname
+      - "traefik.http.routers.openwebui-http.rule=Host(\`ai.internal\`)"
+      - "traefik.http.routers.openwebui-http.entrypoints=web"
+      - "traefik.http.routers.openwebui-http.service=openwebui"
+      # HTTPS router: public access via domain with Let's Encrypt cert
+      - "traefik.http.routers.openwebui-https.rule=Host(\`ai.${DOMAIN}\`)"
+      - "traefik.http.routers.openwebui-https.entrypoints=websecure"
+      - "traefik.http.routers.openwebui-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.openwebui-https.service=openwebui"
+      - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
+EOF
+  else
+    cat >>"${DOCKER_DIR}/ollama-openwebui/docker-compose.yml" <<'EOF'
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.openwebui.rule=Host(`ai.internal`)"
       - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
+EOF
+  fi
+
+  # Write remaining common content (resource limits, healthcheck, networks)
+  cat >>"${DOCKER_DIR}/ollama-openwebui/docker-compose.yml" <<'COMPOSE_PART2'
     # SECURITY: Resource limits
     mem_limit: 2g
     memswap_limit: 4g
@@ -925,7 +1132,7 @@ services:
 networks:
   proxy-net:
     external: true
-EOF
+COMPOSE_PART2
 
   log "Ollama + Open WebUI configured with security hardening"
 
@@ -1136,6 +1343,13 @@ EOF
 CONTAINER="${1:-exegol-htb}"
 WEB_PORT="${2:-45377}"
 
+# Auto-resolve short names: "dev" → "exegol-dev" if the short name doesn't exist
+if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+    if docker ps --format '{{.Names}}' | grep -q "^exegol-${CONTAINER}$"; then
+        CONTAINER="exegol-${CONTAINER}"
+    fi
+fi
+
 echo "🖥️  Setting up noVNC access for Exegol container: ${CONTAINER}"
 echo ""
 
@@ -1176,9 +1390,13 @@ echo "✅ noVNC installation found"
 echo "🔄 Stopping existing websockify (if any)..."
 docker exec "${CONTAINER}" bash -c "pkill websockify 2>/dev/null || true"
 
+# Detect Tailscale IP and bind websockify to it (fallback: 0.0.0.0)
+TAILSCALE_IP=$(ip addr show tailscale0 2>/dev/null | grep -oP 'inet \K[\d.]+' || tailscale ip -4 2>/dev/null)
+BIND_ADDR="${TAILSCALE_IP:-0.0.0.0}"
+
 # Start websockify with noVNC
-echo "🚀 Starting websockify on port ${WEB_PORT}..."
-docker exec "${CONTAINER}" bash -c "nohup websockify --web=/usr/share/novnc/ 0.0.0.0:${WEB_PORT} localhost:${VNC_PORT} > /tmp/websockify.log 2>&1 &"
+echo "🚀 Starting websockify on ${BIND_ADDR}:${WEB_PORT}..."
+docker exec "${CONTAINER}" bash -c "nohup websockify --web=/usr/share/novnc/ ${BIND_ADDR}:${WEB_PORT} localhost:${VNC_PORT} > /tmp/websockify.log 2>&1 &"
 
 # Wait a moment and verify it started
 sleep 2
@@ -1266,6 +1484,12 @@ done
 # Set container name from first positional arg
 if [[ ${#POSITIONAL_ARGS[@]} -gt 0 ]]; then
     NAME="${POSITIONAL_ARGS[0]}"
+fi
+
+# Auto-resolve short names: "dev" → "exegol-dev" if the short name doesn't exist
+if docker ps -a --format '{{.Names}}' | grep -q "^exegol-${NAME}$" && \
+   ! docker ps -a --format '{{.Names}}' | grep -q "^${NAME}$"; then
+    NAME="exegol-${NAME}"
 fi
 
 # Validate port number
@@ -1506,7 +1730,7 @@ if [ -z "$LEAKED_SECRETS" ]; then
     check_pass "No hardcoded secrets found in container environment"
 else
     check_fail "Secrets found in container environment (check .env files):"
-    echo "$LEAKED_SECRETS" | head -3 | sed 's/^/       /'
+    echo "$LEAKED_SECRETS" | head -3 | sed 's/=[^ ]*/=***REDACTED***/g' | sed 's/^/       /'
 fi
 
 # Check 3: .env file permissions

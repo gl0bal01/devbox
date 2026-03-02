@@ -31,9 +31,14 @@ Starts Exegol in the background with VNC/noVNC. Access via browser at `http://ex
 ```bash
 exegol-vnc my-container              # Auto-detect VNC port, noVNC on 45377
 exegol-vnc my-container 45378        # Specify noVNC web port
+exegol-vnc dev 45377                 # Short name: "dev" resolves to "exegol-dev"
 ```
 
 Useful for adding browser access to a container started with `exegol-htb.sh`.
+
+**Short name resolution**: passing `dev` automatically resolves to `exegol-dev` if `dev` doesn't exist as a container name but `exegol-dev` does.
+
+**Tailscale binding**: websockify binds to the Tailscale IP (not 0.0.0.0), so noVNC is only reachable via Tailscale. Access via `http://exegol.internal:PORT/vnc.html` or `http://TAILSCALE_IP:PORT/vnc.html`.
 
 ## Running Multiple Containers
 
@@ -152,6 +157,14 @@ docker ps --filter "ancestor=ghcr.io/ThePorgs/Exegol-images:full" \
 2. Verify the noVNC process: `docker exec my-box ps aux | grep websockify`
 3. Re-run VNC setup: `exegol-vnc my-box 45378`
 4. Check nothing else is using the port: `ss -tlnp | grep 45378`
+
+**Container name auto-resolution**: If you started the container as `exegol-dev`, passing `dev` to `exegol-vnc` works automatically. The script resolves short names to `exegol-<name>`.
+
+**Tailscale binding**: websockify binds to the Tailscale IP. Access must come through Tailscale — the port is not reachable from LAN or public internet. Verify with:
+```bash
+ss -tlnp | grep 45377   # Should show TAILSCALE_IP:45377, not 0.0.0.0
+```
+Access via `http://TAILSCALE_IP:45377/vnc.html` or `http://exegol.internal:45377/vnc.html`.
 
 ### Port Already in Use
 
