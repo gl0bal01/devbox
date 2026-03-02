@@ -1,48 +1,61 @@
 # Exegol Multi-Container Guide
 
-Run multiple Exegol penetration testing containers simultaneously with browser-based remote desktop access.
+Run multiple Exegol penetration testing containers simultaneously with browser-based remote desktop access, using the official Exegol CLI.
 
-## Command Reference
-
-### exegol-htb.sh (Interactive Terminal)
+## CLI Commands (Official `exegol`)
 
 ```bash
-exegol                                # Default: container "exegol-htb"
-exegol my-box                         # Custom container name
-exegol my-box --privileged            # Full host access (use if tools fail)
+exegol info                           # List all containers and their status
+exegol stop my-box                    # Stop a running container
+exegol rm my-box                      # Remove a container entirely
 ```
 
-Opens an interactive terminal session. One terminal per container.
+## `exegol-start.sh` Wrapper
 
-### exegol-remote.sh (Background with noVNC)
+The wrapper script calls the official `exegol` CLI with sensible defaults and auto-sets the VNC password so you can connect without a password prompt.
 
 ```bash
-exegol-remote                                    # Default: exegol-htb on port 45377
-exegol-remote my-box                             # Custom name, default port
-exegol-remote my-box --port 45378                # Custom name and port
-exegol-remote --port 45378                       # Default name, custom port
-exegol-remote my-box --port 45378 --privileged   # All options
+exegol [name] [--port PORT] [--vpn FILE] [--log] [--privileged]
 ```
 
-Starts Exegol in the background with VNC/noVNC. Access via browser at `http://exegol.internal:<PORT>/vnc.html`.
+### Arguments
 
-### exegol-vnc.sh (Add noVNC to Running Container)
+| Argument | Default | Description |
+|---|---|---|
+| `name` | `exegol-htb` | Container name (actual container is `exegol-<name>`) |
+| `--port PORT` | `45377` | noVNC web port |
+| `--vpn FILE` | — | OpenVPN config file to pass to the CLI |
+| `--log` | — | Enable Exegol logging |
+| `--privileged` | — | Run with full privileges (use if tools fail) |
 
-```bash
-exegol-vnc my-container              # Auto-detect VNC port, noVNC on 45377
-exegol-vnc my-container 45378        # Specify noVNC web port
-exegol-vnc dev 45377                 # Short name: "dev" resolves to "exegol-dev"
+### VNC Password
+
+On first start, the wrapper background-sets `root:exegol` via `docker exec`. When the desktop is ready you'll see:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Desktop ready!
+   URL:      http://exegol.internal:PORT/vnc.html
+   User:     root  |  Password: exegol
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Useful for adding browser access to a container started with `exegol-htb.sh`.
+### Resume Behaviour
 
-**Short name resolution**: passing `dev` automatically resolves to `exegol-dev` if `dev` doesn't exist as a container name but `exegol-dev` does.
-
-**Tailscale binding**: websockify binds to the Tailscale IP (not 0.0.0.0), so noVNC is only reachable via Tailscale. Access via `http://exegol.internal:PORT/vnc.html` or `http://TAILSCALE_IP:PORT/vnc.html`.
+If the container `exegol-<name>` already exists, the script calls `exegol start <name>` to resume it (the official CLI restarts it and re-attaches the desktop).
 
 ## Running Multiple Containers
 
-Exegol uses `--network host` so containers share the host network stack. This means each noVNC instance needs a **unique port**. The `--port` flag makes this easy.
+Each container needs a **unique noVNC port**.
+
+### Port Allocation Convention
+
+| Port  | Use Case | Command |
+|-------|----------|---------|
+| 45377 | HTB exploitation (default) | `exegol` |
+| 45378 | OSINT / reconnaissance | `exegol osint --port 45378` |
+| 45379 | Dev / tool testing | `exegol dev --port 45379` |
+| 45380+ | Additional containers | `exegol box2 --port 45380` |
 
 ### Why Multiple Containers?
 
@@ -51,17 +64,6 @@ Exegol uses `--network host` so containers share the host network stack. This me
 - **Parallel work**: Work on multiple boxes or tasks simultaneously
 - **Clean separation**: Different tools/configs per engagement
 
-### Port Allocation Convention
-
-| Port  | Use Case | Command |
-|-------|----------|---------|
-| 45377 | HTB exploitation (default) | `exegol-remote` |
-| 45378 | OSINT / reconnaissance | `exegol-remote osint --port 45378` |
-| 45379 | Dev / tool testing | `exegol-remote dev --port 45379` |
-| 45380+ | Additional containers | `exegol-remote box2 --port 45380` |
-
-Ports 45377-45399 are recommended to keep them grouped and memorable.
-
 ## Use Cases
 
 ### HTB Exploitation (Default)
@@ -69,17 +71,17 @@ Ports 45377-45399 are recommended to keep them grouped and memorable.
 ```bash
 # Connect VPN and start default container
 htb-vpn ~/htb/starting-point.ovpn
-exegol-remote
+exegol
 
-# Access at http://exegol.internal:45377/vnc.html
+# Access at http://exegol.internal:45377/vnc.html  (root / exegol)
 # Attach a terminal alongside the desktop:
-docker exec -it exegol-htb zsh
+docker exec -it exegol-exegol-htb zsh
 ```
 
 ### OSINT Investigation
 
 ```bash
-exegol-remote osint-work --port 45378
+exegol osint-work --port 45378
 
 # Access at http://exegol.internal:45378/vnc.html
 # Tools: maltego, spiderfoot, recon-ng, theHarvester
@@ -88,17 +90,16 @@ exegol-remote osint-work --port 45378
 ### Dev / Tool Testing
 
 ```bash
-exegol-remote dev-test --port 45379
+exegol dev-test --port 45379
 
 # Access at http://exegol.internal:45379/vnc.html
-# Test new tools without affecting your main pentest env
 ```
 
 ### Multiple HTB Boxes Side-by-Side
 
 ```bash
-exegol-remote htb-box1 --port 45377
-exegol-remote htb-box2 --port 45378
+exegol htb-box1 --port 45377
+exegol htb-box2 --port 45378
 
 # Two browser tabs, two separate environments
 # Both share the host VPN (tun0)
@@ -109,62 +110,54 @@ exegol-remote htb-box2 --port 45378
 ### Start, Work, Stop
 
 ```bash
-# Start
-exegol-remote my-box --port 45378
+# Start (creates container + desktop)
+exegol my-box --port 45378
 
 # Work in browser at http://exegol.internal:45378/vnc.html
 
 # Stop when done
-docker stop my-box
+exegol stop my-box
 
 # Remove container entirely
-docker rm my-box
+exegol rm my-box
 ```
 
 ### Resume a Stopped Container
 
 ```bash
-# Restart the container
-docker start my-box
-
-# Re-attach noVNC
-exegol-vnc my-box 45378
-
-# Access at http://exegol.internal:45378/vnc.html
+# Re-enter existing container (wrapper detects it exists)
+exegol my-box --port 45378
 ```
 
 ### Attach Terminal to Running Container
 
 ```bash
-# Open a shell in a running remote container
-docker exec -it my-box zsh
-
-# Run tools from the terminal while using the desktop
+# Open a shell in a running container
+docker exec -it exegol-my-box zsh
 ```
 
-### List Running Exegol Containers
+### List All Containers
 
 ```bash
-docker ps --filter "ancestor=ghcr.io/ThePorgs/Exegol-images:full" \
-  --format "table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}"
+exegol-list    # alias for: exegol info
 ```
 
 ## Troubleshooting
 
-### noVNC Not Accessible
+### Desktop Not Accessible
 
-1. Check the container is running: `docker ps | grep exegol`
-2. Verify the noVNC process: `docker exec my-box ps aux | grep websockify`
-3. Re-run VNC setup: `exegol-vnc my-box 45378`
-4. Check nothing else is using the port: `ss -tlnp | grep 45378`
+1. Check the container is running: `exegol info`
+2. Verify the container name: Exegol CLI names containers `exegol-<name>`
+3. Check port availability: `ss -tlnp | grep 45377`
+4. Try stopping and restarting: `exegol stop my-box && exegol my-box`
 
-**Container name auto-resolution**: If you started the container as `exegol-dev`, passing `dev` to `exegol-vnc` works automatically. The script resolves short names to `exegol-<name>`.
+### VNC Password Prompt
 
-**Tailscale binding**: websockify binds to the Tailscale IP. Access must come through Tailscale — the port is not reachable from LAN or public internet. Verify with:
+The wrapper auto-sets `root:exegol` in a background job. If you see a password prompt, the background job may not have run yet (container took >60s to start). Set it manually:
+
 ```bash
-ss -tlnp | grep 45377   # Should show TAILSCALE_IP:45377, not 0.0.0.0
+docker exec exegol-my-box bash -c "echo 'root:exegol' | chpasswd"
 ```
-Access via `http://TAILSCALE_IP:45377/vnc.html` or `http://exegol.internal:45377/vnc.html`.
 
 ### Port Already in Use
 
@@ -172,10 +165,12 @@ Access via `http://TAILSCALE_IP:45377/vnc.html` or `http://exegol.internal:45377
 Error: Port 45378 is already in use
 ```
 
-Another container or process is on that port. Either:
-- Use a different port: `exegol-remote my-box --port 45380`
-- Find what's using it: `ss -tlnp | grep 45378`
-- Stop the conflicting container: `docker stop <name>`
+Use a different port or find what's using it:
+
+```bash
+ss -tlnp | grep 45378
+exegol my-box --port 45380
+```
 
 ### VPN Not Working in Container
 
@@ -187,23 +182,12 @@ Another container or process is on that port. Either:
 ### Container Won't Start
 
 ```bash
-# Check Docker logs
-docker logs my-box
+# Check for name conflicts
+exegol info
 
-# Common fix: remove stale container with same name
-docker rm -f my-box
-exegol-remote my-box --port 45378
-```
-
-### VNC Display Issues
-
-```bash
-# Kill and restart VNC inside the container
-docker exec my-box bash -c "vncserver -kill :1" 2>/dev/null
-docker exec my-box bash -c "vncserver -localhost yes -geometry 1920x1080 -SecurityTypes Plain -PAMService tigervnc :1"
-
-# Then re-attach noVNC
-exegol-vnc my-box 45378
+# Remove stale container and retry
+exegol rm my-box
+exegol my-box --port 45378
 ```
 
 ---

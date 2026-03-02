@@ -408,7 +408,7 @@ ip route | grep tun0
 
 1. Launch Exegol with host network:
    ```bash
-   ./docker/exegol-htb.sh
+   ./docker/exegol-start.sh
    ```
 
 2. Verify from inside Exegol:

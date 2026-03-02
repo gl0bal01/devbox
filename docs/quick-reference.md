@@ -94,17 +94,18 @@ htb-vpn ~/htb/starting-point.ovpn
 # Check VPN status
 htb-vpn status
 
-# Start Exegol
-exegol
+# Start Exegol with desktop (default port 45377)
+exegol cybergame2026              # start with desktop
+exegol osint-box --port 45378     # different port
+exegol htb --vpn ~/htb/lab.ovpn  # with VPN
 
-# Remote desktop access (browser-based)
-exegol-remote                              # Default: exegol-htb on port 45377
-exegol-remote osint-box --port 45378       # Multiple containers on different ports
+# List all containers
+exegol-list                       # alias for: exegol info
 
-# Setup VNC for running container
-exegol-vnc my-container 45377
+# Remove container
+exegol rm cybergame2026
 
-# Access: http://exegol.internal:45377/vnc.html
+# Access: http://exegol.internal:45377/vnc.html  (root / exegol)
 # See docs/exegol.md for multi-container workflows
 
 # Inside Exegol
@@ -168,9 +169,7 @@ vi                       # neovim (lazyvim)
 │   ├── stop-all.sh
 │   ├── status.sh
 │   ├── security-check.sh
-│   ├── exegol-htb.sh
-│   ├── exegol-remote.sh
-│   ├── exegol-vnc.sh
+│   ├── exegol-start.sh
 │   └── htb-vpn.sh
 ├── devbox/
 │   └── docs/

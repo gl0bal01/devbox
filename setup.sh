@@ -1232,395 +1232,69 @@ echo "  http://traefik.internal   → Traefik Dashboard (requires auth)"
 echo "  http://ollama.internal    → Ollama API"
 EOF
 
-  # exegol-htb.sh
-  cat >"${DOCKER_DIR}/exegol-htb.sh" <<'EOF'
+  # exegol-start.sh
+  cat >"${DOCKER_DIR}/exegol-start.sh" <<'EOF'
 #!/usr/bin/env bash
-# Start Exegol for HTB/pentest with host network (inherits VPN)
-# Usage: ./exegol-htb.sh [container-name] [--privileged]
+# Start Exegol using the official CLI with sensible defaults
+# Usage: ./exegol-start.sh [name] [--port PORT] [--vpn FILE] [--log] [--privileged]
 #
-# SECURITY NOTE: This script uses specific capabilities instead of --privileged
-# by default. Use --privileged flag only if you encounter issues with specific
-# tools that require full privileges (rare).
-
-NAME="${1:-exegol-htb}"
-WORKSPACE="${HOME}/docker/exegol-workspace"
-USE_PRIVILEGED=false
-
-# Check for --privileged flag
-for arg in "$@"; do
-    if [[ "$arg" == "--privileged" ]]; then
-        USE_PRIVILEGED=true
-        echo "⚠️  WARNING: Running with --privileged flag (full host access)"
-    fi
-done
-
-echo "🎯 Starting Exegol container: ${NAME}"
-echo ""
-
-# Check if HTB VPN is connected
-if ip addr show tun0 &>/dev/null; then
-    echo "✅ HTB VPN detected (tun0 interface up)"
-    ip addr show tun0 | grep -E "inet " | awk '{print "   IP: "$2}'
-else
-    echo "⚠️  No VPN detected - connect first with: ./htb-vpn.sh your-lab.ovpn"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    [[ ! $REPLY =~ ^[Yy]$ ]] && exit 0
-fi
-
-echo ""
-echo "🐳 Launching Exegol (this may take a moment on first run)..."
-echo "   Workspace: ${WORKSPACE}"
-
-# Create separate container history file if it doesn't exist
-CONTAINER_HISTORY="${HOME}/docker/exegol-workspace/.exegol_history"
-touch "${CONTAINER_HISTORY}"
-
-if $USE_PRIVILEGED; then
-    # Full privileged mode (use only if absolutely necessary)
-    echo "   Mode: PRIVILEGED (full access)"
-    echo ""
-    docker run -it --rm \
-        --name "${NAME}" \
-        --hostname "${NAME}" \
-        --network host \
-        --privileged \
-        -v "${WORKSPACE}:/workspace" \
-        -v "${CONTAINER_HISTORY}:/root/.zsh_history" \
-        -e DISPLAY="${DISPLAY:-:0}" \
-        -e TERM="${TERM:-xterm-256color}" \
-        ghcr.io/ThePorgs/Exegol-images:full
-else
-    # SECURITY HARDENED: Specific capabilities instead of --privileged (Critical Fix #3)
-    # These capabilities cover most pentest activities:
-    # - NET_ADMIN: Network configuration (required for nmap, arp scans, etc.)
-    # - NET_RAW: Raw sockets (required for ping, nmap SYN scans, etc.)
-    # - SYS_PTRACE: Process tracing (required for debugging, some exploits)
-    # - DAC_READ_SEARCH: Bypass file read permission checks
-    # - SETUID/SETGID: Change user/group IDs (some tools need this)
-    echo "   Mode: Hardened (specific capabilities only)"
-    # SECURITY WARNING: AppArmor/seccomp disabled (HIGH-5 fix - required for pentest tools)
-    echo ""
-    echo -e "   \033[1;33m⚠️  WARNING: Running with disabled security policies (AppArmor/seccomp)\033[0m"
-    echo -e "   \033[1;33m   Required for pentest tools - only run in isolated network environments\033[0m"
-    echo ""
-    docker run -it --rm \
-        --name "${NAME}" \
-        --hostname "${NAME}" \
-        --network host \
-        --cap-drop=ALL \
-        --cap-add=NET_ADMIN \
-        --cap-add=NET_RAW \
-        --cap-add=SYS_PTRACE \
-        --cap-add=DAC_READ_SEARCH \
-        --cap-add=SETUID \
-        --cap-add=SETGID \
-        --cap-add=MKNOD \
-        --cap-add=AUDIT_WRITE \
-        --security-opt apparmor=unconfined \
-        --security-opt seccomp=unconfined \
-        -v "${WORKSPACE}:/workspace" \
-        -v "${CONTAINER_HISTORY}:/root/.zsh_history" \
-        -v "${HOME}/.zsh_history:/root/.host_zsh_history:ro" \
-        -e DISPLAY="${DISPLAY:-:0}" \
-        -e TERM="${TERM:-xterm-256color}" \
-        ghcr.io/ThePorgs/Exegol-images:full
-fi
-
-echo ""
-echo "👋 Exegol session ended."
-echo ""
-echo "💡 If you encountered permission issues with specific tools, try:"
-echo "   ./exegol-htb.sh ${NAME} --privileged"
-EOF
-
-  # exegol-vnc.sh
-  cat >"${DOCKER_DIR}/exegol-vnc.sh" <<'EOF'
-#!/usr/bin/env bash
-# Setup noVNC access for Exegol container with auto-detected VNC port
-# Usage: ./exegol-vnc.sh [container-name] [web-port]
-
-CONTAINER="${1:-exegol-htb}"
-WEB_PORT="${2:-45377}"
-
-# Auto-resolve short names: "dev" → "exegol-dev" if the short name doesn't exist
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
-    if docker ps --format '{{.Names}}' | grep -q "^exegol-${CONTAINER}$"; then
-        CONTAINER="exegol-${CONTAINER}"
-    fi
-fi
-
-echo "🖥️  Setting up noVNC access for Exegol container: ${CONTAINER}"
-echo ""
-
-# Check if container exists and is running
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
-    echo "❌ Error: Container '${CONTAINER}' is not running"
-    echo ""
-    echo "Available Exegol containers:"
-    docker ps --filter "ancestor=ghcr.io/ThePorgs/Exegol-images:full" --format "  - {{.Names}} ({{.Status}})" || echo "  None found"
-    exit 1
-fi
-
-echo "✅ Container found: ${CONTAINER}"
-
-# Auto-detect VNC port
-echo "🔍 Detecting VNC server port..."
-VNC_PORT=$(docker exec "${CONTAINER}" bash -c "ss -tlnp | grep Xtigervnc | grep -oP ':\d+' | head -1 | tr -d ':'" 2>/dev/null)
-
-if [[ -z "$VNC_PORT" ]]; then
-    echo "❌ Error: No VNC server found in container"
-    echo ""
-    echo "💡 VNC might not be started yet. Try running inside Exegol:"
-    echo "   vncserver -localhost yes -geometry 1920x1080"
-    exit 1
-fi
-
-echo "✅ VNC server detected on port: ${VNC_PORT}"
-
-# Check if noVNC is available
-if ! docker exec "${CONTAINER}" bash -c "[ -d /usr/share/novnc ]" 2>/dev/null; then
-    echo "❌ Error: noVNC not found in container at /usr/share/novnc"
-    exit 1
-fi
-
-echo "✅ noVNC installation found"
-
-# Kill existing websockify if running
-echo "🔄 Stopping existing websockify (if any)..."
-docker exec "${CONTAINER}" bash -c "pkill websockify 2>/dev/null || true"
-
-# Detect Tailscale IP and bind websockify to it (fallback: 0.0.0.0)
-TAILSCALE_IP=$(ip addr show tailscale0 2>/dev/null | grep -oP 'inet \K[\d.]+' || tailscale ip -4 2>/dev/null)
-BIND_ADDR="${TAILSCALE_IP:-0.0.0.0}"
-
-# Start websockify with noVNC
-echo "🚀 Starting websockify on ${BIND_ADDR}:${WEB_PORT}..."
-docker exec "${CONTAINER}" bash -c "nohup websockify --web=/usr/share/novnc/ ${BIND_ADDR}:${WEB_PORT} localhost:${VNC_PORT} > /tmp/websockify.log 2>&1 &"
-
-# Wait a moment and verify it started
-sleep 2
-if docker exec "${CONTAINER}" bash -c "ss -tlnp | grep -q ':${WEB_PORT}'" 2>/dev/null; then
-    echo "✅ websockify started successfully"
-else
-    echo "❌ Error: websockify failed to start"
-    echo ""
-    echo "Check logs with:"
-    echo "  docker exec ${CONTAINER} cat /tmp/websockify.log"
-    exit 1
-fi
-
-# Get Tailscale IP
-TAILSCALE_IP=$(ip addr show tailscale0 2>/dev/null | grep -oP 'inet \K[\d.]+' || tailscale ip -4 2>/dev/null)
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ noVNC is ready!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "📍 Access URLs:"
-echo ""
-echo "   Local:      http://localhost:${WEB_PORT}/vnc.html"
-echo "   Auto:       http://localhost:${WEB_PORT}/vnc_auto.html"
-
-if [[ -n "$TAILSCALE_IP" ]]; then
-    echo ""
-    echo "   Tailscale:  http://${TAILSCALE_IP}:${WEB_PORT}/vnc.html"
-    echo "   Or:         http://exegol.internal:${WEB_PORT}/vnc.html"
-    echo ""
-    echo "💡 Add to /etc/hosts on client: ${TAILSCALE_IP}  exegol.internal"
-fi
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "📊 Connection details:"
-echo "   VNC Port:   ${VNC_PORT}"
-echo "   Web Port:   ${WEB_PORT}"
-echo "   Container:  ${CONTAINER}"
-echo ""
-EOF
-
-  # exegol-remote.sh
-  cat >"${DOCKER_DIR}/exegol-remote.sh" <<'EOF'
-#!/usr/bin/env bash
-# Start Exegol in detached mode with noVNC for remote access
-# Usage: ./exegol-remote.sh [container-name] [--port PORT] [--privileged]
+# First run:  creates container with desktop (noVNC browser access)
+# Resume:     re-enters existing container
 #
-# This script starts Exegol in the background with VNC/noVNC access
-# Use ./exegol-htb.sh for interactive terminal sessions
+# Desktop: http://exegol.internal:PORT/vnc.html  (user: root / password: exegol)
 
-# Default values
 NAME="exegol-htb"
-WORKSPACE="${HOME}/docker/exegol-workspace"
-USE_PRIVILEGED=false
-WEB_PORT=45377
-
-# Parse arguments
+PORT=45377
+EXTRA_ARGS=()
 POSITIONAL_ARGS=()
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --port)
-            WEB_PORT="$2"
-            shift 2
-            ;;
-        --privileged)
-            USE_PRIVILEGED=true
-            echo "⚠️  WARNING: Running with --privileged flag (full host access)"
-            shift
-            ;;
-        -*)
-            echo "Unknown option: $1"
-            echo "Usage: $0 [container-name] [--port PORT] [--privileged]"
-            exit 1
-            ;;
-        *)
-            POSITIONAL_ARGS+=("$1")
-            shift
-            ;;
+        --port)       PORT="$2"; shift 2 ;;
+        --vpn)        EXTRA_ARGS+=("--vpn" "$2"); shift 2 ;;
+        --log)        EXTRA_ARGS+=("--log"); shift ;;
+        --privileged) EXTRA_ARGS+=("--privileged"); shift ;;
+        -*)           echo "Unknown option: $1"
+                      echo "Usage: $0 [name] [--port PORT] [--vpn FILE] [--log] [--privileged]"
+                      exit 1 ;;
+        *)            POSITIONAL_ARGS+=("$1"); shift ;;
     esac
 done
 
-# Set container name from first positional arg
-if [[ ${#POSITIONAL_ARGS[@]} -gt 0 ]]; then
-    NAME="${POSITIONAL_ARGS[0]}"
+[[ ${#POSITIONAL_ARGS[@]} -gt 0 ]] && NAME="${POSITIONAL_ARGS[0]}"
+CONTAINER="exegol-${NAME}"
+
+echo "🎯 Exegol: ${NAME}"
+
+# Resume existing container (exegol CLI handles restart + desktop)
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+    echo "   Resuming existing container..."
+    exegol start "$NAME"
+    exit 0
 fi
 
-# Auto-resolve short names: "dev" → "exegol-dev" if the short name doesn't exist
-if docker ps -a --format '{{.Names}}' | grep -q "^exegol-${NAME}$" && \
-   ! docker ps -a --format '{{.Names}}' | grep -q "^${NAME}$"; then
-    NAME="exegol-${NAME}"
-fi
-
-# Validate port number
-if ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]] || [[ "$WEB_PORT" -lt 1024 ]] || [[ "$WEB_PORT" -gt 65535 ]]; then
-    echo "Error: Invalid port number: $WEB_PORT (must be 1024-65535)"
-    exit 1
-fi
-
-echo "🎯 Starting Exegol container in detached mode: ${NAME}"
+echo "   Image: free | Desktop port: ${PORT}"
 echo ""
 
-# Check if container already exists
-if docker ps -a --format '{{.Names}}' | grep -q "^${NAME}$"; then
-    echo "⚠️  Container '${NAME}' already exists"
-    read -p "Remove and recreate? (y/N) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        docker rm -f "${NAME}"
-    else
-        echo "Cancelled."
-        exit 0
-    fi
-fi
+# Background job: wait for container to start, then auto-set VNC password
+(
+    for i in $(seq 1 60); do
+        if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+            sleep 3
+            docker exec "${CONTAINER}" bash -c "echo 'root:exegol' | chpasswd" 2>/dev/null
+            echo "" >/dev/tty
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >/dev/tty
+            echo "✅ Desktop ready!" >/dev/tty
+            echo "   URL:      http://exegol.internal:${PORT}/vnc.html" >/dev/tty
+            echo "   User:     root  |  Password: exegol" >/dev/tty
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >/dev/tty
+            break
+        fi
+        sleep 1
+    done
+) &
 
-# Check if HTB VPN is connected
-if ip addr show tun0 &>/dev/null; then
-    echo "✅ HTB VPN detected (tun0 interface up)"
-    ip addr show tun0 | grep -E "inet " | awk '{print "   IP: "$2}'
-else
-    echo "⚠️  No VPN detected - connect first with: ./htb-vpn.sh your-lab.ovpn"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    [[ ! $REPLY =~ ^[Yy]$ ]] && exit 0
-fi
-
-echo ""
-echo "🐳 Launching Exegol in background..."
-echo "   Workspace: ${WORKSPACE}"
-
-# Create workspace and history
-mkdir -p "${WORKSPACE}"
-CONTAINER_HISTORY="${WORKSPACE}/.exegol_history"
-touch "${CONTAINER_HISTORY}"
-
-if $USE_PRIVILEGED; then
-    echo "   Mode: PRIVILEGED (full access)"
-    echo ""
-    docker run -d \
-        --name "${NAME}" \
-        --hostname "${NAME}" \
-        --network host \
-        --privileged \
-        -v "${WORKSPACE}:/workspace" \
-        -v "${CONTAINER_HISTORY}:/root/.zsh_history" \
-        -e DISPLAY="${DISPLAY:-:0}" \
-        -e TERM="${TERM:-xterm-256color}" \
-        ghcr.io/ThePorgs/Exegol-images:full \
-        tail -f /dev/null
-else
-    echo "   Mode: Hardened (specific capabilities only)"
-    echo ""
-    echo -e "   \033[1;33m⚠️  WARNING: Running with disabled security policies (AppArmor/seccomp)\033[0m"
-    echo -e "   \033[1;33m   Required for pentest tools - only run in isolated network environments\033[0m"
-    echo ""
-    docker run -d \
-        --name "${NAME}" \
-        --hostname "${NAME}" \
-        --network host \
-        --cap-drop=ALL \
-        --cap-add=NET_ADMIN \
-        --cap-add=NET_RAW \
-        --cap-add=SYS_PTRACE \
-        --cap-add=DAC_READ_SEARCH \
-        --cap-add=SETUID \
-        --cap-add=SETGID \
-        --cap-add=MKNOD \
-        --cap-add=AUDIT_WRITE \
-        --security-opt apparmor=unconfined \
-        --security-opt seccomp=unconfined \
-        -v "${WORKSPACE}:/workspace" \
-        -v "${CONTAINER_HISTORY}:/root/.zsh_history" \
-        -v "${HOME}/.zsh_history:/root/.host_zsh_history:ro" \
-        -e DISPLAY="${DISPLAY:-:0}" \
-        -e TERM="${TERM:-xterm-256color}" \
-        ghcr.io/ThePorgs/Exegol-images:full \
-        tail -f /dev/null
-fi
-
-# Wait for container to be ready
-echo ""
-echo "⏳ Waiting for container to start..."
-sleep 3
-
-if ! docker ps --format '{{.Names}}' | grep -q "^${NAME}$"; then
-    echo "❌ Error: Container failed to start"
-    exit 1
-fi
-
-echo "✅ Container started successfully"
-
-# Start VNC server inside container
-echo ""
-echo "🖥️  Starting VNC server..."
-docker exec "${NAME}" bash -c "vncserver -localhost yes -geometry 1920x1080 -SecurityTypes Plain -PAMService tigervnc :1" >/dev/null 2>&1 || {
-    echo "⚠️  VNC server startup may have failed (this is normal if already running)"
-}
-
-# Wait a moment for VNC to initialize
-sleep 2
-
-# Setup noVNC using the helper script
-echo ""
-if [[ -f "${HOME}/docker/exegol-vnc.sh" ]]; then
-    "${HOME}/docker/exegol-vnc.sh" "${NAME}" "${WEB_PORT}"
-else
-    echo "⚠️  exegol-vnc.sh not found - noVNC not configured"
-    echo "   Run manually: ./exegol-vnc.sh ${NAME}"
-fi
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ Exegol is running in the background!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "📍 Useful commands:"
-echo ""
-echo "   Attach shell:    docker exec -it ${NAME} zsh"
-echo "   View logs:       docker logs -f ${NAME}"
-echo "   Stop container:  docker stop ${NAME}"
-echo "   Remove:          docker rm -f ${NAME}"
-echo ""
+exegol start "$NAME" free --desktop --desktop-config "http:0.0.0.0:${PORT}" "${EXTRA_ARGS[@]}"
 EOF
 
   # htb-vpn.sh
@@ -2202,10 +1876,9 @@ alias ccd="claude -c --dangerously-skip-permissions"
 alias start-all="~/docker/start-all.sh"
 alias stop-all="~/docker/stop-all.sh"
 alias status="~/docker/status.sh"
-alias exegol="~/docker/exegol-htb.sh"
+alias exegol="~/docker/exegol-start.sh"
+alias exegol-list="exegol info"
 alias htb-vpn="~/docker/htb-vpn.sh"
-alias exegol-remote="~/docker/exegol-remote.sh"
-alias exegol-vnc="~/docker/exegol-vnc.sh"
 alias security-check="~/docker/security-check.sh"
 
 # ─── Tailscale ───────────────────────────────────────────────────────────────
@@ -2240,7 +1913,7 @@ setopt HIST_IGNORE_DUPS
 echo ""
 echo "🖥️  DevBox Ready (Security Hardened)"
 echo "   Quick commands: start-all | stop-all | status | security-check"
-echo "   Pentest:        exegol | exegol-remote | htb-vpn"
+echo "   Pentest:        exegol | exegol-list | htb-vpn"
 echo ""
 EOF
 
@@ -2381,14 +2054,16 @@ echo ""
 echo "    # Connect VPN"
 echo "    ./htb-vpn.sh ~/htb/your-lab.ovpn"
 echo ""
-echo "    # Start Exegol (full pentest toolkit)"
-echo "    ./exegol-htb.sh"
+echo "    # Start Exegol with desktop (official CLI via wrapper)"
+echo "    ./exegol-start.sh"
 echo ""
-echo "    # Inside Exegol: nmap, metasploit, etc. have HTB network access"
+echo "    # Resume existing container"
+echo "    ./exegol-start.sh my-box"
 echo ""
-echo "    # Remote desktop access (noVNC)"
-echo "    ./exegol-remote.sh"
-echo "    # Then open: http://exegol.internal:45377/vnc.html"
+echo "    # Access desktop: http://exegol.internal:45377/vnc.html  (root / exegol)"
+echo ""
+echo "    # List all containers"
+echo "    exegol info"
 echo ""
 
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

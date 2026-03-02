@@ -299,17 +299,15 @@ htb-vpn ~/htb/lab.ovpn
 # Check VPN status
 htb-vpn status
 
-# Launch Exegol with host network
-exegol
+# Start Exegol with desktop (official CLI via wrapper)
+exegol                                     # Default: exegol-htb on port 45377
+exegol osint-box --port 45378              # Multiple containers on different ports
+exegol htb --vpn ~/htb/lab.ovpn           # With VPN
 
-# Remote desktop access (noVNC in browser)
-exegol-remote                              # Default port 45377
-exegol-remote osint-box --port 45378       # Multiple containers
+# List all containers
+exegol-list                                # alias for: exegol info
 
-# Setup VNC for existing container
-exegol-vnc my-container 45377
-
-# Access at: http://exegol.internal:45377/vnc.html
+# Access at: http://exegol.internal:45377/vnc.html  (root / exegol)
 # See docs/exegol.md for multi-container use cases
 
 # Disconnect VPN
@@ -462,9 +460,7 @@ devbox/
 │   ├── stop-all.sh
 │   ├── status.sh
 │   ├── security-check.sh
-│   ├── exegol-htb.sh
-│   ├── exegol-remote.sh
-│   ├── exegol-vnc.sh
+│   ├── exegol-start.sh
 │   └── htb-vpn.sh
 ├── projects/                    # Your code projects
 ├── htb/                         # HTB OVPN files
