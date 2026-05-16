@@ -11,6 +11,14 @@ SERVICES_DIR="${DEVBOX_DIR}/services"
 FAIL=0
 WAIT_TIMEOUT="${SMOKE_WAIT_TIMEOUT:-120}"
 
+# CI runners start with no Docker networks. setup.sh creates these on real
+# hosts; smoke-test must do the same so `external: true` networks resolve.
+ensure_external_network() {
+    docker network inspect "$1" >/dev/null 2>&1 || docker network create "$1" >/dev/null
+}
+ensure_external_network proxy-net
+trap 'docker network rm proxy-net >/dev/null 2>&1 || true' EXIT
+
 for svc_dir in "${SERVICES_DIR}"/*/; do
     svc=$(basename "${svc_dir}")
     compose_yml="${svc_dir}/docker-compose.yml"
