@@ -56,7 +56,9 @@ services:
     cpus: 4.0
     pids_limit: 200
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/version || exit 1"]
+      # ollama image ships no curl/wget; use the ollama binary which talks
+      # to the local API and exits 0 when the server is reachable.
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 3

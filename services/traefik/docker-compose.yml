@@ -54,7 +54,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    read_only: true
+    # NOTE: cannot set `read_only: true` here. tecnativa/docker-socket-proxy
+    # uses an HAProxy backend that renders /usr/local/etc/haproxy/haproxy.cfg
+    # at container start from a template shipped in the image; tmpfs would
+    # shadow the template, and read-only blocks the render. Defense-in-depth
+    # remains: cap_drop ALL, no-new-privileges, socket mounted :ro, and the
+    # env-var allowlist (only CONTAINERS/NETWORKS/SERVICES/TASKS=1).
     tmpfs:
       - /run
       - /tmp
