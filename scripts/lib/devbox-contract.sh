@@ -78,7 +78,7 @@ DEVBOX_BACKUP_PATHS="${DEVBOX_HOME}/traefik/letsencrypt/acme.json ${HOME}/.confi
 # Pinned support image for `docker run --rm <img> tar ...` volume export.
 # Refreshed by .github/workflows/weekly-rebuild.yml via an opened PR,
 # never auto-mutated on `main`.
-ALPINE_BACKUP_IMAGE="alpine@sha256:21dc6063fd678b478f57c0e13f47560d0ea4eeba26dfc947b2a4f81f686b9f45"
+ALPINE_BACKUP_IMAGE="alpine@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339"
 
 # =============================================================================
 # Accessors
