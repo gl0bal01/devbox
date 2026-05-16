@@ -1068,7 +1068,18 @@ fi
 rm -f "${DOCKER_DIR}/ollama-openwebui/.env.template"
 
 # HTTPS-mode rendering
-TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "127.0.0.1")
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+if [ -z "${TAILSCALE_IP}" ]; then
+  warn "Tailscale not authenticated — \`tailscale ip -4\` returned nothing."
+  warn "Traefik would bind to 127.0.0.1, making services unreachable from the LAN/Tailnet."
+  warn "Run \`sudo tailscale up --accept-routes --advertise-tags=tag:devbox\` first, then re-run setup."
+  if [ "${DEVBOX_ALLOW_NO_TAILSCALE:-false}" = "true" ]; then
+    TAILSCALE_IP="127.0.0.1"
+    warn "DEVBOX_ALLOW_NO_TAILSCALE=true — continuing with TAILSCALE_IP=127.0.0.1 (loopback only)."
+  else
+    error "Refusing to write config.env with a loopback bind. Set DEVBOX_ALLOW_NO_TAILSCALE=true to override."
+  fi
+fi
 
 if [ "${ENABLE_HTTPS}" = "true" ]; then
   info "Rendering HTTPS configuration..."
@@ -1162,15 +1173,32 @@ else
   log "Oh-My-Zsh installed"
 fi
 
-# Update .zshrc (snapshot first, then overwrite)
+# Update .zshrc — preserve user customizations on re-runs.
+# The canonical dev-zshrc starts with a `# DevBox v3 — dev user .zshrc` marker.
+# If the existing file lacks that marker, it's user-authored; snapshot it and
+# leave it in place rather than clobbering. Set DEVBOX_FORCE_ZSHRC=true to
+# force-overwrite.
+ZSHRC_MARKER='# DevBox v3 — dev user .zshrc'
+INSTALL_ZSHRC=true
 if [ -f "${USER_HOME}/.zshrc" ]; then
   snapshot_file "${USER_HOME}/.zshrc"
+  if ! head -n1 "${USER_HOME}/.zshrc" | grep -qF "${ZSHRC_MARKER}"; then
+    if [ "${DEVBOX_FORCE_ZSHRC:-false}" != "true" ]; then
+      warn "Existing ${USER_HOME}/.zshrc is user-customized (no DevBox marker)."
+      warn "Snapshot saved to ~/.local/share/devbox/backups/. Set DEVBOX_FORCE_ZSHRC=true to overwrite."
+      INSTALL_ZSHRC=false
+    fi
+  fi
 fi
 
-info "Installing canonical .zshrc from scripts/install/dev-zshrc..."
-install -m 0644 -o "${NEW_USER}" -g "${NEW_USER}" \
-  "${REPO_DIR}/scripts/install/dev-zshrc" "${USER_HOME}/.zshrc"
-log "Shell configured with aliases (source: scripts/install/dev-zshrc)"
+if [ "${INSTALL_ZSHRC}" = "true" ]; then
+  info "Installing canonical .zshrc from scripts/install/dev-zshrc..."
+  install -m 0644 -o "${NEW_USER}" -g "${NEW_USER}" \
+    "${REPO_DIR}/scripts/install/dev-zshrc" "${USER_HOME}/.zshrc"
+  log "Shell configured with aliases (source: scripts/install/dev-zshrc)"
+else
+  log "Preserved existing ${USER_HOME}/.zshrc (snapshot in ~/.local/share/devbox/backups/)"
+fi
 
 # =============================================================================
 # PHASE 10: Finalizing + Credentials (umask 077 + install + trap per F7)
@@ -1257,10 +1285,9 @@ echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo -e "  ${GREEN}Credentials saved to: ${CREDS_FILE}${NC}"
 echo ""
-echo "  View:    cat ${CREDS_FILE}    ${CREDS_FILE##*.gpg} ${CREDS_FILE: -4}" >/dev/null 2>&1 || true
 case "${CREDS_FILE}" in
-  *.gpg) echo "           gpg --decrypt ${CREDS_FILE}" ;;
-  *)     echo "           cat ${CREDS_FILE}" ;;
+  *.gpg) echo "  View:    gpg --decrypt ${CREDS_FILE}" ;;
+  *)     echo "  View:    cat ${CREDS_FILE}" ;;
 esac
 echo "  Delete:  shred -u ${CREDS_FILE}"
 echo ""

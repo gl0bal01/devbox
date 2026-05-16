@@ -13,11 +13,23 @@ WAIT_TIMEOUT="${SMOKE_WAIT_TIMEOUT:-120}"
 
 # CI runners start with no Docker networks. setup.sh creates these on real
 # hosts; smoke-test must do the same so `external: true` networks resolve.
+# Only remove networks we created — otherwise a dev running this on a host
+# with live services would have proxy-net yanked out from under them.
+CREATED_NETWORKS=()
 ensure_external_network() {
-    docker network inspect "$1" >/dev/null 2>&1 || docker network create "$1" >/dev/null
+    if docker network inspect "$1" >/dev/null 2>&1; then
+        return 0
+    fi
+    docker network create "$1" >/dev/null
+    CREATED_NETWORKS+=("$1")
+}
+cleanup_networks() {
+    for net in "${CREATED_NETWORKS[@]}"; do
+        docker network rm "${net}" >/dev/null 2>&1 || true
+    done
 }
 ensure_external_network proxy-net
-trap 'docker network rm proxy-net >/dev/null 2>&1 || true' EXIT
+trap cleanup_networks EXIT
 
 for svc_dir in "${SERVICES_DIR}"/*/; do
     svc=$(basename "${svc_dir}")
