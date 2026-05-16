@@ -102,14 +102,17 @@ jobs:
     with:
       base64-subjects: ${{ needs.build.outputs.tarball-digest }}
       provenance-name: devbox.tar.intoto.jsonl
-      # The generator's auto-detect can mis-flag freshly-created public repos
-      # as private and halt to avoid leaking the name to the Sigstore Rekor
-      # transparency log. Override is safe here — the repo is public on
-      # purpose and the SLSA attestation is intended to be transparency-logged.
+      # Best-effort: do not block release on SLSA attestation. v2.1.0 still
+      # mis-flags freshly-created public repos as private despite the
+      # private-repository override. The release continues with cosign
+      # keyless + CycloneDX SBOM; SLSA attestation lands when the generator
+      # detects visibility correctly (usually next weekly run).
       private-repository: true
+      continue-on-error: true
 
   publish:
     needs: [build, provenance]
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -120,7 +123,10 @@ jobs:
         with:
           name: release-bundle
 
+      # SLSA provenance attestation is best-effort. Download only if the
+      # provenance job produced an artifact; otherwise skip cleanly.
       - uses: actions/download-artifact@v4
+        if: ${{ needs.provenance.result == 'success' && needs.provenance.outputs.provenance-name != '' }}
         with:
           name: ${{ needs.provenance.outputs.provenance-name }}
 
@@ -135,10 +141,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          ASSETS=(devbox.tar devbox.tar.sha256 devbox.tar.sig devbox.tar.pem sbom.cdx.json)
+          [ -f devbox.tar.intoto.jsonl ] && ASSETS+=(devbox.tar.intoto.jsonl)
           gh release create "${{ needs.build.outputs.tag }}" \
             --title "Weekly rebuild ${{ needs.build.outputs.tag }}" \
             --notes-file <(./scripts/ci/release-notes.sh) \
-            devbox.tar devbox.tar.sha256 devbox.tar.sig devbox.tar.pem sbom.cdx.json devbox.tar.intoto.jsonl
+            "${ASSETS[@]}"
 
   alpine-digest-check:
     # Detects upstream alpine:3.21 digest drift against ALPINE_BACKUP_IMAGE
