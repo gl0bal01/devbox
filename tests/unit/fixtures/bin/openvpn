@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+echo "openvpn $*" >>"/tmp/tmp.urWMqCVPfG/calls.log"
+# Parse --writepid argument
+writepid=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--writepid" ]; then
+    writepid="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+if [ -n "${writepid}" ]; then
+  echo $$ >"${writepid}"
+fi
+# Simulate daemon: do nothing (exit 0)
+exit 0

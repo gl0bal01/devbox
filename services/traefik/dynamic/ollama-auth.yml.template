@@ -1,0 +1,7 @@
+http:
+  middlewares:
+    ollama-auth:
+      basicAuth:
+        users:
+          - "${OLLAMA_AUTH_USER}:${OLLAMA_AUTH_HASH}"
+        removeHeader: true

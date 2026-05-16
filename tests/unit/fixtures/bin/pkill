@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+echo "pkill $*" >>"/tmp/tmp.urWMqCVPfG/calls.log"
+# Simulate success by default (process found)
+exit 0

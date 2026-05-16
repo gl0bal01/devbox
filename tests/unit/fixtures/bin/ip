@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+echo "ip $*" >>"/tmp/tmp.urWMqCVPfG/calls.log"
+# ip addr show tun0 or ip link show tun0
+if echo "$*" | grep -q "tun0"; then
+  if [ -f "/tmp/tmp.urWMqCVPfG/tun0_up" ]; then
+    echo "5: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500"
+    echo "    inet 10.10.14.5/24 scope global tun0"
+    exit 0
+  else
+    echo "Device tun0 does not exist." >&2
+    exit 1
+  fi
+fi
+exec /sbin/ip "$@" 2>/dev/null || exec /usr/sbin/ip "$@" 2>/dev/null || true

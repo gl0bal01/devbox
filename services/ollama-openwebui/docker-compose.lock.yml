@@ -1,0 +1,5 @@
+services:
+  ollama:
+    image: docker.io/ollama/ollama@sha256:a79fc15cecf33ed3b05c09a28415db7291c85c4c9d5945f4597317ca02456532
+  openwebui:
+    image: ghcr.io/open-webui/open-webui@sha256:c1e4f0927fb0acd53bcbd8bbc92ecaf7ca36a23ee4cb8f25ce90c541012a473a

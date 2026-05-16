@@ -1,0 +1,17 @@
+[Unit]
+Description=DevBox stack (Traefik + Ollama + Open WebUI)
+After=docker.service network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=${DEVBOX_USER}
+WorkingDirectory=${DEVBOX_HOME}
+ExecStart=${DEVBOX_HOME}/start-all.sh
+ExecStop=${DEVBOX_HOME}/stop-all.sh
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

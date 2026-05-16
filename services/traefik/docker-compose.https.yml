@@ -1,0 +1,15 @@
+# HTTPS override for Traefik
+#
+# Used as a Compose override file in HTTPS mode. The runtime invocation is:
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml -f docker-compose.lock.yml ...
+# (driven by COMPOSE_FILE in ~/.config/devbox/config.env when ENABLE_HTTPS=true).
+#
+# Adds: port 443 binding, OVH ACME credentials via env_file, letsencrypt volume.
+
+services:
+  traefik:
+    env_file: .env       # OVH_ENDPOINT / OVH_APPLICATION_KEY / OVH_APPLICATION_SECRET / OVH_CONSUMER_KEY
+    ports:
+      - "${TAILSCALE_IP}:443:443"
+    volumes:
+      - ./letsencrypt:/letsencrypt

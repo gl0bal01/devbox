@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+echo "sudo $*" >>"/tmp/tmp.urWMqCVPfG/calls.log"
+# Execute the rest as a regular command (mocked further downstream)
+shift 0
+# If the command is openvpn, delegate to fake openvpn
+cmd="$1"
+if [ "${cmd}" = "openvpn" ] || [ "${cmd}" = "/usr/sbin/openvpn" ]; then
+  shift
+  exec "/home/dev/docker/devbox/tests/unit/fixtures/bin/openvpn" "$@"
+fi
+# install -d: create the directory
+if [ "${cmd}" = "install" ]; then
+  shift
+  exec /usr/bin/install "$@"
+fi
+# kill, rm, pkill — delegate to real commands
+exec "$@"

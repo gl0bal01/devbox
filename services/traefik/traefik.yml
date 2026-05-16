@@ -1,0 +1,44 @@
+# Traefik static config — HTTP-only mode (no install-time substitution).
+#
+# For HTTPS mode, this file is OVERWRITTEN at install time with the rendered
+# output of traefik.https.yml.template (which adds entryPoints.websecure and
+# the OVH/Let's Encrypt cert resolver, with $USER_EMAIL substituted).
+
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      middlewares:
+        - default-headers-base@file
+        - rate-limit@file
+        - internal-only@file
+
+providers:
+  docker:
+    endpoint: "tcp://docker-socket-proxy:2375"
+    exposedByDefault: false
+    network: proxy-net
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+  insecure: false
+
+ping: {}
+
+log:
+  level: INFO
+  filePath: /var/log/traefik/traefik.log
+  maxSize: 10
+  maxBackups: 3
+  maxAge: 7
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100

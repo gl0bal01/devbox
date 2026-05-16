@@ -1,0 +1,30 @@
+# HTTPS override for Ollama + Open WebUI
+#
+# Used as a Compose override file in HTTPS mode. The runtime invocation is:
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml ...
+# (driven by COMPOSE_FILE_OLLAMA in ~/.config/devbox/config.env when
+# ENABLE_HTTPS=true).
+#
+# Both routers stay on the Tailscale-bound entrypoint; this overlay adds the
+# TLS cert resolver only. There is no public 0.0.0.0:443 exposure — port 443
+# is bound to ${TAILSCALE_IP} in services/traefik/docker-compose.https.yml.
+# ${DOMAIN} is Compose runtime interpolation from ~/.config/devbox/config.env
+# — NOT install-time.
+
+services:
+  ollama:
+    labels:
+      - "traefik.http.routers.ollama-https.rule=Host(`ollama.${DOMAIN}`)"
+      - "traefik.http.routers.ollama-https.entrypoints=websecure"
+      - "traefik.http.routers.ollama-https.tls=true"
+      - "traefik.http.routers.ollama-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.ollama-https.service=ollama"
+      - "traefik.http.routers.ollama-https.middlewares=ollama-auth@file"
+
+  openwebui:
+    labels:
+      - "traefik.http.routers.openwebui-https.rule=Host(`ai.${DOMAIN}`)"
+      - "traefik.http.routers.openwebui-https.entrypoints=websecure"
+      - "traefik.http.routers.openwebui-https.tls=true"
+      - "traefik.http.routers.openwebui-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.openwebui-https.service=openwebui"
