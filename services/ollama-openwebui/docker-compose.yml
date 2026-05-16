@@ -1,0 +1,113 @@
+# Ollama + Open WebUI
+#
+# Base file: HTTP-only mode, Tailscale-bound (via Traefik entrypoints).
+# For HTTPS mode, additionally use docker-compose.https.yml as a Compose
+# override (configured via COMPOSE_FILE_OLLAMA in ~/.config/devbox/config.env
+# when ENABLE_HTTPS=true).
+#
+# Image tags are pinned at the patch level. Digest lockfiles
+# (docker-compose.lock.yml) are committed and always chained into the
+# compose invocation by setup.sh. See ARCHITECTURE.md.
+#
+# Ollama is reachable only through Traefik on Tailscale (Host(`ollama.internal`))
+# behind basic-auth (ollama-auth@file). The container exposes 11434 to the
+# proxy-net only; no host port bind. Open WebUI talks to ollama on the
+# internal ollama-net via in-container DNS (http://ollama:11434, no auth).
+#
+# x-logging: this anchor block is duplicated by design across every compose file
+# in services/. Drift detection is enforced by scripts/ci/check-anchor-consistency.sh.
+# Any change must be applied to every compose file in one commit.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  ollama:
+    image: ollama/ollama:0.5.13
+    container_name: ollama
+    restart: unless-stopped
+    logging: *default-logging
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_RESOURCE
+    expose:
+      - "11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - ollama-net
+      - proxy-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ollama.rule=Host(`ollama.internal`)"
+      - "traefik.http.routers.ollama.entrypoints=web"
+      - "traefik.http.routers.ollama.service=ollama"
+      - "traefik.http.routers.ollama.middlewares=ollama-auth@file"
+      - "traefik.http.services.ollama.loadbalancer.server.port=11434"
+    mem_limit: 8g
+    memswap_limit: 8g
+    cpus: 4.0
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:0.4
+    container_name: openwebui
+    restart: unless-stopped
+    logging: *default-logging
+    stop_grace_period: 30s
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"
+      ENABLE_SIGNUP: "${ENABLE_SIGNUP:-false}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - openwebui-data:/app/backend/data
+    networks:
+      - proxy-net
+      - ollama-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openwebui.rule=Host(`ai.internal`)"
+      - "traefik.http.routers.openwebui.entrypoints=web"
+      - "traefik.http.routers.openwebui.service=openwebui"
+      - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.0
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  ollama-data:
+  openwebui-data:
+
+networks:
+  proxy-net:
+    external: true
+  ollama-net:
+    driver: bridge
+    internal: true

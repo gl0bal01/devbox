@@ -1,0 +1,11 @@
+http:
+  middlewares:
+    default-headers-base:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customResponseHeaders:
+          X-Content-Type-Options: "nosniff"
+          X-Robots-Tag: "noindex, nofollow"

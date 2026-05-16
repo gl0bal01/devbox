@@ -1,0 +1,221 @@
+name: weekly-rebuild
+on:
+  schedule:
+    - cron: '0 6 * * 1'         # Monday 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-rebuild
+  cancel-in-progress: false     # never interrupt a half-signed release
+
+permissions: read-all           # workflow-level least-privilege; jobs override as needed
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tarball-digest: ${{ steps.hash.outputs.digest }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub (rate-limit headroom)
+        # Skip cleanly when secrets are absent (fork / first-time setup).
+        # Anonymous pulls work until the 100/6h/IP rate limit; weekly CI
+        # rarely hits that. Set DOCKERHUB_USERNAME + DOCKERHUB_TOKEN repo
+        # secrets to enable authenticated pulls.
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Lint (shellcheck + bash -n + bats)
+        run: ./scripts/ci/lint.sh
+
+      - name: Compose config validate (HTTP + HTTPS)
+        run: ./scripts/ci/check-compose-config.sh
+
+      - name: Anchor consistency
+        run: ./scripts/ci/check-anchor-consistency.sh
+
+      - name: Refresh digest lockfiles
+        run: ./scripts/update-images.sh --apply
+
+      - name: Smoke test (before any push/tag/sign)
+        run: ./scripts/ci/smoke-test.sh
+
+      - name: Build deterministic tarball
+        id: tar
+        run: |
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+              -cf devbox.tar services scripts setup.sh README.md LICENSE docs
+
+      - name: Compute tarball SHA256
+        id: hash
+        run: |
+          sha256sum devbox.tar | awk '{print $1}' > devbox.tar.sha256
+          echo "digest=$(base64 -w0 devbox.tar.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM of locked images
+        uses: anchore/sbom-action@v0.17.0
+        with:
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign tarball (cosign keyless)
+        run: |
+          cosign sign-blob --yes devbox.tar \
+            --output-signature devbox.tar.sig \
+            --output-certificate devbox.tar.pem
+
+      - name: Compute tag (weekly-YYYYMMDD)
+        id: tag
+        run: echo "tag=weekly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts to job (deferred publish)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: |
+            devbox.tar
+            devbox.tar.sha256
+            devbox.tar.sig
+            devbox.tar.pem
+            sbom.cdx.json
+
+  provenance:
+    needs: build
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.tarball-digest }}
+      provenance-name: devbox.tar.intoto.jsonl
+
+  publish:
+    needs: [build, provenance]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+
+      - name: Annotated tag with digest in message
+        run: |
+          git config user.name "devbox-ci"
+          git config user.email "ci@devbox.local"
+          git tag -a "${{ needs.build.outputs.tag }}" -m "Weekly rebuild $(date -u). Digest: $(cat devbox.tar.sha256)"
+          git push origin "${{ needs.build.outputs.tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ needs.build.outputs.tag }}" \
+            --title "Weekly rebuild ${{ needs.build.outputs.tag }}" \
+            --notes-file <(./scripts/ci/release-notes.sh) \
+            devbox.tar devbox.tar.sha256 devbox.tar.sig devbox.tar.pem sbom.cdx.json devbox.tar.intoto.jsonl
+
+  alpine-digest-check:
+    # Detects upstream alpine:3.21 digest drift against ALPINE_BACKUP_IMAGE
+    # in scripts/lib/devbox-contract.sh. If drift is detected, opens a PR
+    # bumping the digest — never auto-merges. Operators review the PR diff
+    # and decide whether to land the new digest. See docs/updating.md.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub (rate-limit headroom)
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve current alpine:3.21 manifest digest
+        id: upstream
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker manifest inspect alpine:3.21 \
+              | jq -r '.manifests[0].digest // .config.digest // empty')"
+          if ! printf '%s' "${DIGEST}" | grep -qE '^sha256:[a-f0-9]{64}$'; then
+              echo "ERROR: failed to resolve alpine:3.21 digest" >&2
+              exit 1
+          fi
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Read contract ALPINE_BACKUP_IMAGE
+        id: contract
+        run: |
+          set -euo pipefail
+          LINE="$(grep '^ALPINE_BACKUP_IMAGE=' scripts/lib/devbox-contract.sh)"
+          DIGEST="$(printf '%s' "${LINE}" | sed -E 's/.*@(sha256:[a-f0-9]{64}).*/\1/')"
+          if ! printf '%s' "${DIGEST}" | grep -qE '^sha256:[a-f0-9]{64}$'; then
+              echo "ERROR: ALPINE_BACKUP_IMAGE in contract is not sha256-pinned" >&2
+              exit 1
+          fi
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Compare and bump if drifted
+        id: bump
+        env:
+          UPSTREAM_DIGEST: ${{ steps.upstream.outputs.digest }}
+          CONTRACT_DIGEST: ${{ steps.contract.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "${UPSTREAM_DIGEST}" = "${CONTRACT_DIGEST}" ]; then
+              echo "alpine digest in sync — no PR needed"
+              echo "drift=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+          fi
+          echo "drift=true" >> "${GITHUB_OUTPUT}"
+          # In-place bump via sed; only the digest fragment changes.
+          sed -i -E "s|alpine@${CONTRACT_DIGEST}|alpine@${UPSTREAM_DIGEST}|g" \
+              scripts/lib/devbox-contract.sh
+          # PR body file (env-var indirection avoids workflow injection).
+          {
+              printf 'Automatic bump of `ALPINE_BACKUP_IMAGE` in `scripts/lib/devbox-contract.sh`.\n\n'
+              printf '## Diff\n\n'
+              printf -- '- Previous: `alpine@%s`\n' "${CONTRACT_DIGEST}"
+              printf -- '- New:      `alpine@%s`\n' "${UPSTREAM_DIGEST}"
+              printf '\n## Review checklist\n\n'
+              printf -- '- [ ] `scripts/lib/devbox-contract.sh` is the only file changed.\n'
+              printf -- '- [ ] New digest resolves on docker.io/library/alpine (run `docker manifest inspect alpine@%s`).\n' "${UPSTREAM_DIGEST}"
+              printf -- '- [ ] No other ALPINE references introduced.\n'
+              printf '\nMerge to ship; close to defer until next weekly run.\n'
+          } > /tmp/alpine-bump-body.md
+
+      - name: Open PR for digest bump
+        if: ${{ steps.bump.outputs.drift == 'true' }}
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/alpine-digest-refresh-${{ github.run_id }}
+          base: main
+          title: 'chore(contract): refresh ALPINE_BACKUP_IMAGE digest'
+          commit-message: 'chore(contract): refresh ALPINE_BACKUP_IMAGE digest'
+          body-path: /tmp/alpine-bump-body.md
+          delete-branch: true
+          signoff: false

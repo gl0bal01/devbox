@@ -1,0 +1,63 @@
+# Traefik static config — HTTPS mode.
+#
+# This file is a .template: at install time, setup.sh renders it with:
+#   envsubst '$USER_EMAIL' < traefik.https.yml.template > ~/docker/traefik/traefik.yml
+# when ENABLE_HTTPS=true. It OVERWRITES the HTTP-only traefik.yml.
+#
+# Whitelisted substitution variable: $USER_EMAIL
+
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      middlewares:
+        - default-headers-base@file
+        - rate-limit@file
+        - internal-only@file
+  websecure:
+    address: ":443"
+    http:
+      middlewares:
+        - default-headers-base@file
+        - default-headers-hsts@file
+        - rate-limit@file
+        - internal-only@file
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: $USER_EMAIL
+      storage: /letsencrypt/acme.json
+      dnsChallenge:
+        provider: ovh
+        delayBeforeCheck: 0
+
+providers:
+  docker:
+    endpoint: "tcp://docker-socket-proxy:2375"
+    exposedByDefault: false
+    network: proxy-net
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+  insecure: false
+
+ping: {}
+
+log:
+  level: INFO
+  filePath: /var/log/traefik/traefik.log
+  maxSize: 10
+  maxBackups: 3
+  maxAge: 7
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100

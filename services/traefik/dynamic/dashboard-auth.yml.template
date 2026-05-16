@@ -1,0 +1,7 @@
+http:
+  middlewares:
+    dashboard-auth:
+      basicAuth:
+        users:
+          - "${TRAEFIK_USER}:${TRAEFIK_HASH}"
+        removeHeader: true

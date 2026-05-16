@@ -1,0 +1,7 @@
+http:
+  middlewares:
+    default-headers-hsts:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: false
