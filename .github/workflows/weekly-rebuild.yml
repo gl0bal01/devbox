@@ -102,6 +102,11 @@ jobs:
     with:
       base64-subjects: ${{ needs.build.outputs.tarball-digest }}
       provenance-name: devbox.tar.intoto.jsonl
+      # The generator's auto-detect can mis-flag freshly-created public repos
+      # as private and halt to avoid leaking the name to the Sigstore Rekor
+      # transparency log. Override is safe here — the repo is public on
+      # purpose and the SLSA attestation is intended to be transparency-logged.
+      private-repository: true
 
   publish:
     needs: [build, provenance]
