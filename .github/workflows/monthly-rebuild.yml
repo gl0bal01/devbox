@@ -1,11 +1,11 @@
-name: weekly-rebuild
+name: monthly-rebuild
 on:
   schedule:
-    - cron: '0 6 * * 1'         # Monday 06:00 UTC
+    - cron: '0 6 1 * *'         # 1st of each month, 06:00 UTC
   workflow_dispatch:
 
 concurrency:
-  group: weekly-rebuild
+  group: monthly-rebuild
   cancel-in-progress: false     # never interrupt a half-signed release
 
 permissions: read-all           # workflow-level least-privilege; jobs override as needed
@@ -24,7 +24,7 @@ jobs:
 
       - name: Login to Docker Hub (rate-limit headroom)
         # Skip cleanly when secrets are absent (fork / first-time setup).
-        # Anonymous pulls work until the 100/6h/IP rate limit; weekly CI
+        # Anonymous pulls work until the 100/6h/IP rate limit; monthly CI
         # rarely hits that. Set DOCKERHUB_USERNAME + DOCKERHUB_TOKEN repo
         # secrets to enable authenticated pulls.
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
@@ -34,6 +34,9 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install bats (runner image ships shellcheck but not bats)
+        run: sudo apt-get install -y -qq --no-install-recommends bats
 
       - name: Lint (shellcheck + bash -n + bats)
         run: ./scripts/ci/lint.sh
@@ -77,9 +80,9 @@ jobs:
             --output-signature devbox.tar.sig \
             --output-certificate devbox.tar.pem
 
-      - name: Compute tag (weekly-YYYYMMDD)
+      - name: Compute tag (monthly-YYYYMMDD)
         id: tag
-        run: echo "tag=weekly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=monthly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts to job (deferred publish)
         uses: actions/upload-artifact@v4
@@ -106,7 +109,7 @@ jobs:
       # mis-flags freshly-created public repos as private despite the
       # private-repository override. The release continues with cosign
       # keyless + CycloneDX SBOM; SLSA attestation lands when the generator
-      # detects visibility correctly (usually next weekly run).
+      # detects visibility correctly (usually next monthly run).
       private-repository: true
       continue-on-error: true
 
@@ -134,7 +137,7 @@ jobs:
         run: |
           git config user.name "devbox-ci"
           git config user.email "ci@devbox.local"
-          git tag -a "${{ needs.build.outputs.tag }}" -m "Weekly rebuild $(date -u). Digest: $(cat devbox.tar.sha256)"
+          git tag -a "${{ needs.build.outputs.tag }}" -m "Monthly rebuild $(date -u). Digest: $(cat devbox.tar.sha256)"
           git push origin "${{ needs.build.outputs.tag }}"
 
       - name: Create GitHub Release
@@ -145,7 +148,7 @@ jobs:
           ASSETS=(devbox.tar devbox.tar.sha256 devbox.tar.sig devbox.tar.pem sbom.cdx.json)
           [ -f devbox.tar.intoto.jsonl ] && ASSETS+=(devbox.tar.intoto.jsonl)
           gh release create "${{ needs.build.outputs.tag }}" \
-            --title "Weekly rebuild ${{ needs.build.outputs.tag }}" \
+            --title "Monthly rebuild ${{ needs.build.outputs.tag }}" \
             --notes-file <(./scripts/ci/release-notes.sh) \
             "${ASSETS[@]}"
 
@@ -220,7 +223,7 @@ jobs:
               printf -- '- [ ] `scripts/lib/devbox-contract.sh` is the only file changed.\n'
               printf -- '- [ ] New digest resolves on docker.io/library/alpine (run `docker manifest inspect alpine@%s`).\n' "${UPSTREAM_DIGEST}"
               printf -- '- [ ] No other ALPINE references introduced.\n'
-              printf '\nMerge to ship; close to defer until next weekly run.\n'
+              printf '\nMerge to ship; close to defer until next monthly run.\n'
           } > /tmp/alpine-bump-body.md
 
       - name: Open PR for digest bump

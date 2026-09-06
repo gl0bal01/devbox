@@ -2,7 +2,7 @@
 
 This directory contains all Docker Compose configurations and deployment artifacts for devbox services. This guide explains the layout, conventions, and how files are generated and deployed.
 
-> **Tarball installs:** The contents of this directory (`services/`), together with `scripts/`, `setup.sh`, `docs/`, `README.md`, and `LICENSE`, are bundled verbatim into the signed weekly release tarball (`devbox.tar`). Operators who install from a release tarball get the same lockfiles and `setup.sh` as those who clone the repo — no extra steps are needed. See [docs/updating.md](../docs/updating.md#install-from-a-signed-release-tarball) for the full verified download and install sequence.
+> **Tarball installs:** The contents of this directory (`services/`), together with `scripts/`, `setup.sh`, `docs/`, `README.md`, and `LICENSE`, are bundled verbatim into the signed monthly release tarball (`devbox.tar`). Operators who install from a release tarball get the same lockfiles and `setup.sh` as those who clone the repo — no extra steps are needed. See [docs/updating.md](../docs/updating.md#install-from-a-signed-release-tarball) for the full verified download and install sequence.
 
 ## Directory Layout
 
@@ -39,9 +39,9 @@ services/
 
 ### 1. `docker-compose.yml` (Base, Tracked)
 
-The base Compose file for HTTP-only deployment. Contains service definitions with **mutable minor-pinned tags** (e.g., `traefik:v3.2`).
+The base Compose file for HTTP-only deployment. Contains service definitions with **mutable minor-pinned tags** (e.g., `traefik:v3.7`).
 
-**Never:** Pin by digest in the base file. Tags are intentionally mutable to allow weekly CI refresh.
+**Never:** Pin by digest in the base file. Tags are intentionally mutable to allow monthly CI refresh.
 
 ### 2. `docker-compose.https.yml` (Override, Tracked)
 
@@ -58,10 +58,10 @@ Compose override file loaded **only** when `ENABLE_HTTPS=true`. Adds port 443, A
 Contains **immutable image digests**. Every image reference is rewritten from tag to digest (e.g., `traefik@sha256:abc123...`).
 
 **Generated twice on initial commit (Critic Issue #2):**
-- First run: emits `traefik:v3.2@sha256:...`
+- First run: emits `traefik:v3.7@sha256:...`
 - Second run: emits `traefik@sha256:...` (stable, committed)
 
-**Updated by:** `./scripts/update-images.sh --apply` (runs weekly CI or manually)
+**Updated by:** `./scripts/update-images.sh --apply` (runs monthly CI or manually)
 
 **Rationale:** ARCHITECTURE.md — provides reproducible, auditable image deployment.
 
@@ -153,7 +153,7 @@ docker compose -f services/traefik/docker-compose.yml -f services/traefik/docker
 # Should be empty diff
 ```
 
-### Weekly Updates (CI Workflow)
+### Monthly Updates (CI Workflow)
 
 ```bash
 ./scripts/update-images.sh --check  # Check for updates
@@ -163,8 +163,8 @@ git add services/ && git commit -m "Refresh digests ($(date +%Y-%m-%d))"
 
 ## Tag Pinning Strategy
 
-Tags in base `docker-compose.yml` are **minor-pinned** (e.g., `traefik:v3.2`):
-- Weekly CI refresh pulls latest patch within the minor
+Tags in base `docker-compose.yml` are **minor-pinned** (e.g., `traefik:v3.7`):
+- Monthly CI refresh pulls latest patch within the minor
 - Major bumps (`v3 → v4`) are manual edits
 - Inspect available majors manually via `docker manifest inspect <image>:<tag>` or upstream release notes
 

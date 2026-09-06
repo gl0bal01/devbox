@@ -76,7 +76,7 @@ DEVBOX_VOLUMES_ollama_openwebui="ollama-data openwebui-data"
 DEVBOX_BACKUP_PATHS="${DEVBOX_HOME}/traefik/letsencrypt/acme.json ${HOME}/.config/devbox ${DEVBOX_HOME}/exegol-workspace"
 
 # Pinned support image for `docker run --rm <img> tar ...` volume export.
-# Refreshed by .github/workflows/weekly-rebuild.yml via an opened PR,
+# Refreshed by .github/workflows/monthly-rebuild.yml via an opened PR,
 # never auto-mutated on `main`.
 ALPINE_BACKUP_IMAGE="alpine@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339"
 

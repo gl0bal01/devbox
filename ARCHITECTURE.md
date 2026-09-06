@@ -98,11 +98,14 @@ the listener at all. OVH credentials live outside the repo at `~/.config/devbox/
 ## Image Pinning + Digest Lockfiles
 
 **Decision.** Base `services/*/docker-compose.yml` files pin images by exact minor tag
-(`traefik:v3.2`, `ollama/ollama:0.5.13`). A generated `docker-compose.lock.yml` per
+(`traefik:v3.7`, `open-webui:0.11`), or by exact patch tag where upstream publishes no
+minor tag (`ollama/ollama:0.33.3`, `docker-socket-proxy:v0.5.0`). A generated `docker-compose.lock.yml` per
 service pins by sha256 digest (`traefik@sha256:...`). Setup.sh emits compose chains as
 `docker-compose.yml[:docker-compose.https.yml][:docker-compose.lock.yml]` so the
-lockfile is always loaded when present. `scripts/update-images.sh` (two-pass per
-Critic #2) refreshes lockfiles; CI gates on `update-images.sh --check`.
+lockfile is always loaded when present. `scripts/update-images.sh` refreshes lockfiles: pass one resolves digests from the
+base file ONLY (chaining the old lock would let its digest override the tag, so nothing
+would ever refresh; this was a real bug until 2026-09), pass two chains the result to
+normalize to `name@sha256` form. CI gates on `update-images.sh --check`.
 
 **Drivers.** Reproducibility: a tag can move but a digest cannot. Trust but verify:
 operators see what's actually running.
@@ -110,14 +113,14 @@ operators see what's actually running.
 **Rejected.** Tag-only (mutable, no reproducibility); digest-only in base file (loses
 auto-patch updates); hand-maintained lock files (drift).
 
-**Consequences.** Weekly CI runs `update-images.sh --apply` and produces a smoke-tested
-weekly-* release. Operators on `main` get the latest lockfile on every weekly. Major
-version bumps (e.g., `v3.2 → v4.0`) are manual base-file edits.
+**Consequences.** Monthly CI runs `update-images.sh --apply` and produces a smoke-tested
+monthly-* release. Operators on `main` get the latest lockfile on every monthly run. Major
+version bumps (e.g., `v3.7 → v4.0`) are manual base-file edits.
 
 ## Tag Strategy: Minor-Pinned, Operator-Bumped Majors
 
-**Decision.** Image tags in the base compose file are minor-pinned (`traefik:v3.2`).
-Weekly CI runs `--apply` and refreshes digests within the minor — operators get patch
+**Decision.** Image tags in the base compose file are minor-pinned (`traefik:v3.7`).
+Monthly CI runs `--apply` and refreshes digests within the minor — operators get patch
 fixes automatically. Major version bumps are manual: operator edits the tag, runs
 `--apply`, smoke-tests, commits.
 
@@ -127,13 +130,14 @@ usually break things (require manual review).
 **Rejected.** Tag-by-major-only (miss patches); tag-by-digest-only in base (lose
 auto-refresh signal); fully automatic major bumps (breaking changes ship un-reviewed).
 
-**Consequences.** New minor releases require operator action (intentional). The
-Operator inspects available majors manually via `docker manifest inspect <image>:<tag>` or upstream release notes.
+**Consequences.** New minor releases require operator action (intentional). Patch-pinned
+images (ollama, docker-socket-proxy) get no automatic refresh at all; bump them by hand.
+The operator inspects available majors manually via `docker manifest inspect <image>:<tag>` or upstream release notes.
 
 ## Alpine Backup Image Refresh
 
 **Decision.** `scripts/lib/devbox-contract.sh` pins `ALPINE_BACKUP_IMAGE=alpine@sha256:...`
-for `backup.sh`'s named-volume export. `.github/workflows/weekly-rebuild.yml` includes
+for `backup.sh`'s named-volume export. `.github/workflows/monthly-rebuild.yml` includes
 an `alpine-digest-check` job that resolves the upstream `alpine:3.21` manifest, compares
 to the contract, and on drift opens a PR via `peter-evans/create-pull-request@v6` —
 never mutates `main` directly.
@@ -144,7 +148,7 @@ Auto-PR keeps the operator in the loop without daily-busywork.
 **Rejected.** Auto-commit to main (no review); never refresh (digest goes stale, OS
 patches missed); pin in setup.sh instead of contract (forces re-render on every bump).
 
-**Consequences.** First weekly run after a digest change opens a PR. Operator reviews
+**Consequences.** First monthly run after a digest change opens a PR. Operator reviews
 the diff (single-line digest swap), runs the manual `docker manifest inspect` to
 confirm, merges. Workflow injection-safe: all manifest output flows through env vars
 to `run:` blocks; PR body comes from `body-path:` file, not inline `body:`.
@@ -201,7 +205,7 @@ operator cannot pretend it didn't happen.
 
 ## Release Tarball: Cosign Keyless + SLSA + SBOM
 
-**Decision.** Weekly CI builds a deterministic `devbox.tar`, signs with cosign keyless
+**Decision.** Monthly CI builds a deterministic `devbox.tar`, signs with cosign keyless
 (GitHub OIDC + Sigstore Rekor), generates a CycloneDX SBOM, attaches a SLSA Build L3
 provenance attestation, and publishes via `gh release create`. Operators install via
 the tarball after `cosign verify-blob` (with both `--certificate-identity` AND
@@ -214,7 +218,7 @@ keyless removes the long-lived signing key footgun.
 (needs to verify the public key out-of-band); no signing (downgrade risk for any
 operator who skips verification).
 
-**Consequences.** First weekly run after each main commit produces a signed bundle.
+**Consequences.** First monthly run after each main commit produces a signed bundle.
 `docs/updating.md` documents the verify sequence. The tarball bundles `services/`,
 `scripts/`, `setup.sh`, `docs/`, `README.md`, `LICENSE` — self-contained install.
 
@@ -289,26 +293,26 @@ auth at the Compose-network level (would break Open WebUI).
 unless the operator manually pointed `OLLAMA_BASE_URL` at the external host (the
 rotation script warns when it sees this).
 
-## CI: pr-validate + weekly-rebuild
+## CI: pr-validate + monthly-rebuild
 
 **Decision.** `.github/workflows/pr-validate.yml` runs on every PR: lint
 (shellcheck + bash -n + 55 unit bats), compose-config validate (HTTP + HTTPS),
 anchor consistency, docs↔tree consistency, digest lockfile freshness. Docker Hub login
 is conditional (`if: env.DOCKERHUB_USERNAME != ''`) so forks don't fail.
 
-`.github/workflows/weekly-rebuild.yml` runs Monday 06:00 UTC (or via
+`.github/workflows/monthly-rebuild.yml` runs on the 1st of each month at 06:00 UTC (or via
 `workflow_dispatch`): same lint + compose-config + anchor + smoke test + lockfile
 refresh + deterministic tarball + cosign signing + SBOM + SLSA + GitHub release. A
 separate `alpine-digest-check` job opens an auto-PR on alpine digest drift.
 
-**Drivers.** Catch drift early; produce a verifiable weekly artifact; let forks
+**Drivers.** Catch drift early; produce a verifiable monthly artifact; let forks
 contribute without secret setup.
 
 **Rejected.** Single monolithic workflow (hard to retry one step); no fork support
 (community-hostile); no auto-PR for alpine (digest goes stale silently).
 
 **Consequences.** Every PR runs the full contract test suite (35 contract bats + 55
-unit bats). Weekly tag is the reproducible install path. Alpine refresh PRs require
+unit bats). Monthly tag is the reproducible install path. Alpine refresh PRs require
 operator merge.
 
 ## Contract Bats Test Suite
@@ -316,7 +320,7 @@ operator merge.
 **Decision.** `tests/contract/contract.bats` (24 tests) + `tests/contract/systemd.bats`
 (11 tests) form the install-contract regression suite. Tests run against the repo
 files, not a live install — they don't require docker except for two explicit
-network-gated assertions (`docker manifest inspect ollama/ollama:0.5.13` and
+network-gated assertions (`docker manifest inspect ollama/ollama:0.33.3` and
 `update-images.sh --check`).
 
 Coverage: contract structure, helper-read vars ⊆ setup-emitted keys, every

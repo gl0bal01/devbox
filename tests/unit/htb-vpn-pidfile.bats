@@ -147,6 +147,7 @@ sys.stdout.write(result)
 # ---------------------------------------------------------------------------
 
 @test "start invokes openvpn with --writepid and --daemon flags" {
+  touch "${WORK_DIR}/tun0_up"  # tun0 up immediately: skips the 10x1s poll loop
   run bash "${PATCHED_SCRIPT}" "${FAKE_OVPN}" start || true
   run grep "openvpn" "${CALL_LOG}"
   [ "${status}" -eq 0 ]
@@ -155,6 +156,7 @@ sys.stdout.write(result)
 }
 
 @test "start creates PID file in the PID directory" {
+  touch "${WORK_DIR}/tun0_up"  # tun0 up immediately: skips the 10x1s poll loop
   run bash "${PATCHED_SCRIPT}" "${FAKE_OVPN}" start || true
   [ -f "${FAKE_PID_DIR}/htb-vpn.pid" ]
 }

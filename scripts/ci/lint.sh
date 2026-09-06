@@ -69,11 +69,12 @@ if [ -x "${SCRIPT_DIR}/check-docs-tree.sh" ]; then
     echo ""
 fi
 
-# bats unit tests
+# bats unit + contract tests
 TESTS_DIR="${DEVBOX_DIR}/tests/unit"
+CONTRACT_DIR="${DEVBOX_DIR}/tests/contract"
 if [ -d "${TESTS_DIR}" ] && command -v bats >/dev/null 2>&1; then
-    echo "bats unit tests: ${TESTS_DIR}"
-    if bats "${TESTS_DIR}"; then
+    echo "bats tests: ${TESTS_DIR} ${CONTRACT_DIR}"
+    if bats "${TESTS_DIR}" "${CONTRACT_DIR}"; then
         : # ok
     else
         echo "  [FAIL] bats tests" >&2

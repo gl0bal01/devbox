@@ -32,6 +32,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Install bats (runner image ships shellcheck but not bats)
+        run: sudo apt-get install -y -qq --no-install-recommends bats
+
       - name: Lint (shellcheck + bash -n + bats)
         run: ./scripts/ci/lint.sh
 

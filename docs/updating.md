@@ -4,20 +4,20 @@ This guide explains how to refresh image digests, verify cosign signatures, and 
 
 ## Install from a signed release tarball
 
-The recommended production install path is the signed weekly release tarball, not a `git clone`. Every tarball is:
+The recommended production install path is the signed monthly release tarball, not a `git clone`. Every tarball is:
 
 - **Signed** with cosign keyless (GitHub OIDC, Sigstore Rekor transparency log)
 - **Digest-attested** with a `sha256sum`-verifiable `.sha256` file
 - **SLSA provenance** attached as an in-toto attestation (SLSA Build L3)
 - **SBOM** generated from the locked image set (CycloneDX JSON)
-- **Immutable** per weekly tag — the tarball content is frozen at build time
+- **Immutable** per monthly tag — the tarball content is frozen at build time
 
 The git-clone path (`git clone ... && ./setup.sh`) is fine for development and contribution. For any persistent or production deployment, prefer the tarball so you get the full verification chain.
 
-### Download the latest weekly release
+### Download the latest monthly release
 
 ```bash
-# Resolve the latest weekly-* tag
+# Resolve the latest monthly-* tag
 TAG="$(gh release list --repo gl0bal01/devbox --json tagName,createdAt \
       --jq 'sort_by(.createdAt) | last | .tagName')"
 
@@ -43,12 +43,14 @@ sha256sum -c devbox.tar.sha256
 cosign verify-blob devbox.tar \
   --signature devbox.tar.sig \
   --certificate devbox.tar.pem \
-  --certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/weekly-rebuild.yml@refs/heads/main' \
+  --certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/monthly-rebuild.yml@refs/heads/main' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
 # Expected output: Verified OK
 ```
 
 Both `--certificate-identity` and `--certificate-oidc-issuer` are required — omitting either would accept any GitHub Actions workflow as a valid signer.
+
+> **Legacy `weekly-*` releases** (cut before the switch to a monthly cadence) were signed by the old workflow file. To verify one, use `--certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/weekly-rebuild.yml@refs/heads/main'` instead. Their signatures remain valid; only the identity string differs.
 
 **Step 3 — SLSA provenance verification (optional, recommended for compliance):**
 
@@ -81,7 +83,7 @@ The tarball bundles `services/`, `scripts/`, `setup.sh`, `README.md`, `LICENSE`,
 
 ## Image Digest Refresh
 
-Devbox uses minor-pinned tags (e.g., `traefik:v3.2`) with SHA digest locking for reproducibility. The `update-images.sh` script refreshes digests within the pinned minor version.
+Devbox uses minor-pinned tags (e.g., `traefik:v3.7`) with SHA digest locking for reproducibility. The `update-images.sh` script refreshes digests within the pinned minor version.
 
 ### Check for Updates (Dry-Run)
 
@@ -124,14 +126,14 @@ git checkout HEAD -- services/
 
 ## Major Version Bumps
 
-Minor-pinned tags (e.g., `traefik:v3.2`) pull the latest patch within the minor. Major version bumps (`v3 → v4`) are manual edits.
+Minor-pinned tags (e.g., `traefik:v3.7`) pull the latest patch within the minor. Major version bumps (`v3 → v4`) are manual edits.
 
 ### Bump a Major Version
 
 1. **Edit the base compose file:**
    ```bash
    # Edit services/traefik/docker-compose.yml
-   # Change: image: traefik:v3.2
+   # Change: image: traefik:v3.7
    # To:     image: traefik:v4.1
    ```
 
@@ -189,16 +191,16 @@ cd devbox
 - No provenance information
 - Bleeding-edge (possible regressions)
 
-### Mode 2: `weekly-YYYYMMDD` (Recommended for Production)
+### Mode 2: `monthly-YYYYMMDD` (Recommended for Production)
 
-Install from a tagged weekly release:
+Install from a tagged monthly release:
 
 ```bash
-# List available weekly releases
-git tag | grep weekly- | sort
+# List available monthly releases
+git tag | grep monthly- | sort
 
-# Checkout a specific weekly tag (e.g., weekly-20260413)
-git checkout weekly-20260413
+# Checkout a specific monthly tag (e.g., monthly-20260413)
+git checkout monthly-20260413
 ./setup.sh
 ```
 
@@ -218,8 +220,8 @@ git checkout weekly-20260413
 - Any case where reproducibility matters
 
 **Risk:**
-- One week behind latest (by design, allows time for issues to surface)
-- If the weekly release is bad, rollback to the prior week's tag
+- Up to one month behind latest (by design, allows time for issues to surface)
+- If the monthly release is bad, rollback to the prior month's tag
 
 ### Mode 3: `@sha256:<digest>` (Most Paranoid)
 
@@ -228,7 +230,7 @@ Pin the release artifact by SHA256:
 ```bash
 # Pin the digest manually (from a release you've previously verified)
 DEVBOX_SHA256="abc123def456..."
-TAG="weekly-20260516"
+TAG="monthly-20260516"
 
 gh release download "$TAG" --repo gl0bal01/devbox -p 'devbox.tar' -p 'devbox.tar.sha256'
 
@@ -246,7 +248,7 @@ sudo ./setup.sh
 
 **What you get:**
 - Exact artifact verification by cryptographic hash
-- Same guarantees as Mode 2 (weekly tag)
+- Same guarantees as Mode 2 (monthly tag)
 - Immutable reference (SHA is the artifact's permanent identity)
 
 **When to use:**
@@ -275,7 +277,7 @@ Omitting either flag makes the verification effectively useless — any keyless 
 ### Optional — Rekor transparency log lookup
 
 ```bash
-# Search Rekor for entries signed by the weekly-rebuild workflow
+# Search Rekor for entries signed by the monthly-rebuild workflow
 rekor-cli search --rekor_server https://rekor.sigstore.dev \
   --artifact devbox.tar
 ```
@@ -292,7 +294,7 @@ Image digest lockfiles target the CI runner architecture (**x86_64**). If you're
 # Clone and checkout the desired release
 git clone https://github.com/gl0bal01/devbox.git
 cd devbox
-git checkout weekly-20260413
+git checkout monthly-20260413
 
 # The existing lockfiles are x86_64; regenerate for your architecture
 ./scripts/update-images.sh --apply
@@ -309,11 +311,11 @@ git checkout weekly-20260413
 
 ### Subsequent Installs on arm64
 
-The lockfiles are now arm64-specific. Weekly updates will continue to refresh arm64 digests:
+The lockfiles are now arm64-specific. Monthly updates will continue to refresh arm64 digests:
 
 ```bash
 git pull  # Get the latest x86_64 lockfiles from main
-git checkout weekly-YYYYMMDD  # Check out the weekly tag (x86_64)
+git checkout monthly-YYYYMMDD  # Check out the monthly tag (x86_64)
 
 # Regenerate for arm64
 ./scripts/update-images.sh --apply
@@ -344,7 +346,7 @@ DEVBOX_SKIP_SIGNATURE_VERIFY=1 ./setup.sh
 ```
 
 **Important:**
-- Existing `weekly-YYYYMMDD` releases remain valid (their signatures were created at build time)
+- Existing `monthly-YYYYMMDD` releases remain valid (their signatures were created at build time)
 - Only *new* releases would be blocked
 - Use this override only in emergencies
 - After Sigstore recovers, manually verify the cosign signature before deploying
@@ -398,7 +400,7 @@ docker logs traefik
 
 ### Auto-PR mechanism
 
-`.github/workflows/weekly-rebuild.yml` includes an `alpine-digest-check` job that runs on the same weekly schedule. The job:
+`.github/workflows/monthly-rebuild.yml` includes an `alpine-digest-check` job that runs on the same monthly schedule. The job:
 
 1. Resolves the current `alpine:3.21` multi-arch manifest digest via `docker manifest inspect`.
 2. Reads the digest currently pinned in `scripts/lib/devbox-contract.sh`.
@@ -414,11 +416,11 @@ When the PR opens:
 - Confirm `scripts/lib/devbox-contract.sh` is the only file changed.
 - Run `docker manifest inspect alpine@sha256:<new-digest>` locally to confirm the digest resolves on docker.io/library/alpine.
 - Make sure no other `ALPINE` references slipped in (the bump is a pure digest swap).
-- Merge to ship the new image; close the PR to defer until the next weekly check.
+- Merge to ship the new image; close the PR to defer until the next monthly check.
 
 ### Manual refresh fallback
 
-If you need to refresh outside the weekly schedule:
+If you need to refresh outside the monthly schedule:
 
 ```bash
 # Resolve the current upstream digest

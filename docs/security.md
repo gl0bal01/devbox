@@ -68,7 +68,7 @@ These rules enforce that certain commands (firewall, VPN, Tailscale) don't requi
 **Upstream image registry compromise:**
 - Docker Hub, GitHub Container Registry, or Ollama upstream is compromised and returns malicious images
 - **Mitigation:** ARCHITECTURE.md (digest pinning) ensures exact images are deployed; malicious image would need to match the pinned digest
-- **Action required:** Weekly CI smoke test (ARCHITECTURE.md) detects obvious breakage; cosign signature verification (ARCHITECTURE.md) confirms build provenance
+- **Action required:** Monthly CI smoke test (ARCHITECTURE.md) detects obvious breakage; cosign signature verification (ARCHITECTURE.md) confirms build provenance
 
 **Setup.sh download compromise:**
 - Bun, Rustup, Tailscale, or other installer URLs are MITM'd or registry is compromised
@@ -105,7 +105,7 @@ These rules enforce that certain commands (firewall, VPN, Tailscale) don't requi
 - **Recommendation:** Review Exegol releases periodically; pin a specific known-good digest if reproducibility is critical
 
 **GitHub Actions compromise:**
-- GitHub Actions infrastructure is compromised; malicious `weekly-rebuild.yml` is deployed
+- GitHub Actions infrastructure is compromised; malicious `monthly-rebuild.yml` is deployed
 - **Why partially out-of-scope:** GitHub Actions is infrastructure you don't control
 - **Partially mitigated:** SLSA provenance (ARCHITECTURE.md) attests the build environment; operator can verify against GitHub's public logs
 - **Recommendation:** Review cosign signatures carefully; if suspicious, re-build and sign the release locally

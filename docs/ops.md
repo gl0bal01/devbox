@@ -213,8 +213,8 @@ git log --oneline services/ | head -3
 ```
 
 **Prevention:**
-- The weekly CI (ARCHITECTURE.md) runs a smoke test before cutting a `weekly-*` tag
-- Avoid running `update-images.sh --apply` manually; wait for the weekly CI release instead
+- The monthly CI (ARCHITECTURE.md) runs a smoke test before cutting a `monthly-*` tag
+- Avoid running `update-images.sh --apply` manually; wait for the monthly CI release instead
 
 ### Scenario B: Hand-Edited Files Clobbered by setup.sh Re-run
 

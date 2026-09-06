@@ -27,7 +27,7 @@
 #
 # Image pinning (see ARCHITECTURE.md):
 #   - Compose `--lock-image-digests` produces docker-compose.lock.yml
-#   - Lockfiles committed; weekly CI rebuild refreshes within minor tag
+#   - Lockfiles committed; monthly CI rebuild refreshes within minor tag
 #   - cosign keyless + SBOM + SLSA provenance on the release artifact
 #
 # Verified downloads (see ARCHITECTURE.md):

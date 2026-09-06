@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CI smoke test: bring up each service, verify health, tear down.
-# Intended for weekly CI. Requires Docker and docker compose v2.
+# Intended for monthly CI. Requires Docker and docker compose v2.
 # Exit non-zero on any failure.
 set -euo pipefail
 

@@ -131,8 +131,6 @@ anchor-check:
 	@bash scripts/ci/check-anchor-consistency.sh
 
 test: lint compose-check anchor-check
-	@echo "Running: bats tests/contract/contract.bats"
-	@bats tests/contract/contract.bats
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Install-dependent targets (require marker)
