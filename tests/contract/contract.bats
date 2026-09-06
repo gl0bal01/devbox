@@ -9,7 +9,7 @@
 #   - Named volumes in compose files are listed in backup.sh.
 #   - container_name entries in compose files appear in security-check.sh.
 #   - ALPINE_BACKUP_IMAGE is sha256-pinned.
-#   - docker manifest inspect ollama/ollama:0.5.13 exits 0 (skip without docker/net).
+#   - docker manifest inspect ollama/ollama:0.33.3 exits 0 (skip without docker/net).
 #   - Dry install copy of contract.sh is byte-identical to the repo copy.
 # =============================================================================
 
@@ -159,10 +159,10 @@ SETUP="${DEVBOX_DIR}/setup.sh"
     [ "$status" -eq 0 ]
 }
 
-@test "ollama compose pins 0.5.13 (not invalid 0.5)" {
-    run grep -E '^[[:space:]]+image:[[:space:]]+ollama/ollama:0\.5\.13$' "${SERVICES_DIR}/ollama-openwebui/docker-compose.yml"
+@test "ollama compose pins 0.33.3 (not invalid 0.33)" {
+    run grep -E '^[[:space:]]+image:[[:space:]]+ollama/ollama:0\.33\.3$' "${SERVICES_DIR}/ollama-openwebui/docker-compose.yml"
     [ "$status" -eq 0 ]
-    run grep -E '^[[:space:]]+image:[[:space:]]+ollama/ollama:0\.5$' "${SERVICES_DIR}/ollama-openwebui/docker-compose.yml"
+    run grep -E '^[[:space:]]+image:[[:space:]]+ollama/ollama:0\.33$' "${SERVICES_DIR}/ollama-openwebui/docker-compose.yml"
     [ "$status" -ne 0 ]
 }
 
@@ -228,14 +228,14 @@ SETUP="${DEVBOX_DIR}/setup.sh"
     rm -rf "${tmp}"
 }
 
-@test "docker manifest inspect ollama/ollama:0.5.13 exits 0 (or SKIP without docker/net)" {
+@test "docker manifest inspect ollama/ollama:0.33.3 exits 0 (or SKIP without docker/net)" {
     if ! command -v docker >/dev/null 2>&1; then
         skip "docker not installed"
     fi
     if ! docker info >/dev/null 2>&1; then
         skip "docker daemon not running"
     fi
-    run docker manifest inspect ollama/ollama:0.5.13
+    run docker manifest inspect ollama/ollama:0.33.3
     [ "$status" -eq 0 ]
 }
 

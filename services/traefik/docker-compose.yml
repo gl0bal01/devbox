@@ -22,7 +22,8 @@ services:
   # Docker socket proxy — exposes a read-only subset of the docker API to Traefik
   # so Traefik never touches /var/run/docker.sock directly.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:0.3
+    # upstream ships no minor tag; patch-pinned (bump manually)
+    image: tecnativa/docker-socket-proxy:v0.5.0
     container_name: docker-socket-proxy
     restart: unless-stopped
     logging: *default-logging
@@ -74,7 +75,7 @@ services:
       start_period: 5s
 
   traefik:
-    image: traefik:v3.2
+    image: traefik:v3.7
     container_name: traefik
     restart: unless-stopped
     logging: *default-logging

@@ -45,35 +45,22 @@ for svc_dir in "${SERVICES_DIR}"/*/; do
     TMPLOCK="/tmp/new-lock-${svc}.yml.$$"
     trap 'rm -f "${TMPLOCK}"' EXIT INT TERM
 
-    # Generate first pass
-    if [ -f "${lock_yml}" ]; then
-        ( cd "${svc_dir}" && \
-          docker compose -f docker-compose.yml -f docker-compose.lock.yml \
-              config --lock-image-digests > "${TMPLOCK}" ) 2>/dev/null || \
-        ( cd "${svc_dir}" && \
-          docker compose -f docker-compose.yml \
-              config --lock-image-digests > "${TMPLOCK}" )
-    else
-        ( cd "${svc_dir}" && \
-          docker compose -f docker-compose.yml \
-              config --lock-image-digests > "${TMPLOCK}" )
-    fi
+    # Generate first pass from the BASE file only. Chaining the existing
+    # lock here would let its digest override the base tag, so a tag bump
+    # (or an upstream patch release) would never change the resolved digest.
+    ( cd "${svc_dir}" && \
+      docker compose -f docker-compose.yml \
+          config --lock-image-digests > "${TMPLOCK}" )
 
-    # Stabilization: if it differs from existing lock, regenerate once more
-    # (first-generation drift fix per Critic Issue #2)
-    if [ -f "${lock_yml}" ] && ! diff -q "${lock_yml}" "${TMPLOCK}" >/dev/null 2>&1; then
-        echo "  First pass differs — stabilizing..."
-        TMPLOCK2="/tmp/new-lock-${svc}-2.yml.$$"
-        ( cd "${svc_dir}" && \
-          docker compose -f docker-compose.yml -f "${TMPLOCK}" \
-              config --lock-image-digests > "${TMPLOCK2}" ) 2>/dev/null || \
-        cp "${TMPLOCK}" "${TMPLOCK2}"
-
-        if ! diff -q "${TMPLOCK}" "${TMPLOCK2}" >/dev/null 2>&1; then
-            echo "  [WARN] Second pass still differs from first — real drift detected"
-        fi
-        mv "${TMPLOCK2}" "${TMPLOCK}"
-    fi
+    # Normalization pass: re-run with the first pass chained so the output
+    # takes the canonical `name@sha256:...` form (first pass emits
+    # `name:tag@sha256:...`). Always runs; output is idempotent.
+    TMPLOCK2="/tmp/new-lock-${svc}-2.yml.$$"
+    ( cd "${svc_dir}" && \
+      docker compose -f docker-compose.yml -f "${TMPLOCK}" \
+          config --lock-image-digests > "${TMPLOCK2}" ) 2>/dev/null || \
+    cp "${TMPLOCK}" "${TMPLOCK2}"
+    mv "${TMPLOCK2}" "${TMPLOCK}"
 
     if [ "${MODE}" = "check" ]; then
         if [ ! -f "${lock_yml}" ]; then
