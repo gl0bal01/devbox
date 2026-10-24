@@ -2,50 +2,48 @@ name: pr-validate
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 concurrency:
   group: pr-validate-${{ github.ref }}
   cancel-in-progress: true
 
-permissions: read-all
+permissions:
+  contents: read
 
+# Mirrored 1:1 by scripts/ci/local.sh (make ci). Add a step there too.
 jobs:
-  validate:
+  static:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends bats
+      - name: Lint (bash -n + shellcheck)
+        run: scripts/ci/lint.sh
+      - name: Docs reference only existing paths
+        run: scripts/ci/check-docs-tree.sh
+      - name: Bats (unit + contract)
+        run: bats tests/unit tests/contract
+      - name: Compose chains valid, no wildcard binds
+        run: scripts/ci/check-compose-config.sh
 
-      - name: Login to Docker Hub (rate-limit headroom)
-        # Skip cleanly when secrets are absent (fork / first-time setup).
-        # Anonymous pulls work until the 100/6h/IP rate limit. Set
-        # DOCKERHUB_USERNAME + DOCKERHUB_TOKEN repo secrets to enable
-        # authenticated pulls.
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Free disk for model-server images
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Docker Hub login (rate-limit headroom; skipped without secrets)
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Install bats (runner image ships shellcheck but not bats)
-        run: sudo apt-get install -y -qq --no-install-recommends bats
-
-      - name: Lint (shellcheck + bash -n + bats)
-        run: ./scripts/ci/lint.sh
-
-      - name: Compose config validate (HTTP + HTTPS)
-        run: ./scripts/ci/check-compose-config.sh
-
-      - name: Anchor consistency
-        run: ./scripts/ci/check-anchor-consistency.sh
-
-      - name: Docs <-> tree consistency
-        run: ./scripts/ci/check-docs-tree.sh
-
-      - name: Check digest lockfile freshness
-        run: ./scripts/update-images.sh --check
+      - name: Install devbox on the runner and exercise it
+        env:
+          MISE_GITHUB_TOKEN: ${{ github.token }}
+        run: sudo --preserve-env=MISE_GITHUB_TOKEN DEVBOX_E2E_I_UNDERSTAND=yes scripts/ci/e2e.sh

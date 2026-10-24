@@ -1,239 +1,121 @@
 name: monthly-rebuild
 on:
   schedule:
-    - cron: '0 6 1 * *'         # 1st of each month, 06:00 UTC
+    - cron: '0 6 1 * *'   # 1st of the month, 06:00 UTC
   workflow_dispatch:
 
 concurrency:
   group: monthly-rebuild
-  cancel-in-progress: false     # never interrupt a half-signed release
+  cancel-in-progress: false
 
-permissions: read-all           # workflow-level least-privilege; jobs override as needed
+permissions:
+  contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      id-token: write   # required for cosign keyless OIDC -> Fulcio
-    outputs:
-      tarball-digest: ${{ steps.hash.outputs.digest }}
-      tag: ${{ steps.tag.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Login to Docker Hub (rate-limit headroom)
-        # Skip cleanly when secrets are absent (fork / first-time setup).
-        # Anonymous pulls work until the 100/6h/IP rate limit; monthly CI
-        # rarely hits that. Set DOCKERHUB_USERNAME + DOCKERHUB_TOKEN repo
-        # secrets to enable authenticated pulls.
-        if: ${{ env.DOCKERHUB_USERNAME != '' }}
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Install bats (runner image ships shellcheck but not bats)
-        run: sudo apt-get install -y -qq --no-install-recommends bats
-
-      - name: Lint (shellcheck + bash -n + bats)
-        run: ./scripts/ci/lint.sh
-
-      - name: Compose config validate (HTTP + HTTPS)
-        run: ./scripts/ci/check-compose-config.sh
-
-      - name: Anchor consistency
-        run: ./scripts/ci/check-anchor-consistency.sh
-
-      - name: Refresh digest lockfiles
-        run: ./scripts/update-images.sh --apply
-
-      - name: Smoke test (before any push/tag/sign)
-        run: ./scripts/ci/smoke-test.sh
-
-      - name: Build deterministic tarball
-        id: tar
-        run: |
-          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-              -cf devbox.tar services scripts setup.sh README.md LICENSE docs
-
-      - name: Compute tarball SHA256
-        id: hash
-        run: |
-          sha256sum devbox.tar | awk '{print $1}' > devbox.tar.sha256
-          echo "digest=$(base64 -w0 devbox.tar.sha256)" >> "$GITHUB_OUTPUT"
-
-      - name: Generate SBOM of locked images
-        uses: anchore/sbom-action@v0.17.0
-        with:
-          format: cyclonedx-json
-          output-file: sbom.cdx.json
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3.7.0
-
-      - name: Sign tarball (cosign keyless)
-        run: |
-          cosign sign-blob --yes devbox.tar \
-            --output-signature devbox.tar.sig \
-            --output-certificate devbox.tar.pem
-
-      - name: Compute tag (monthly-YYYYMMDD)
-        id: tag
-        run: echo "tag=monthly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifacts to job (deferred publish)
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-bundle
-          path: |
-            devbox.tar
-            devbox.tar.sha256
-            devbox.tar.sig
-            devbox.tar.pem
-            sbom.cdx.json
-
-  provenance:
-    needs: build
-    permissions:
-      id-token: write
-      contents: write
-      actions: read
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      base64-subjects: ${{ needs.build.outputs.tarball-digest }}
-      provenance-name: devbox.tar.intoto.jsonl
-      # Best-effort: do not block release on SLSA attestation. v2.1.0 still
-      # mis-flags freshly-created public repos as private despite the
-      # private-repository override. The release continues with cosign
-      # keyless + CycloneDX SBOM; SLSA attestation lands when the generator
-      # detects visibility correctly (usually next monthly run).
-      private-repository: true
-      continue-on-error: true
-
-  publish:
-    needs: [build, provenance]
-    if: ${{ always() && needs.build.result == 'success' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-bundle
-
-      # SLSA provenance attestation is best-effort. Download only if the
-      # provenance job produced an artifact; otherwise skip cleanly.
-      - uses: actions/download-artifact@v4
-        if: ${{ needs.provenance.result == 'success' && needs.provenance.outputs.provenance-name != '' }}
-        with:
-          name: ${{ needs.provenance.outputs.provenance-name }}
-
-      - name: Annotated tag with digest in message
-        run: |
-          git config user.name "devbox-ci"
-          git config user.email "ci@devbox.local"
-          git tag -a "${{ needs.build.outputs.tag }}" -m "Monthly rebuild $(date -u). Digest: $(cat devbox.tar.sha256)"
-          git push origin "${{ needs.build.outputs.tag }}"
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          ASSETS=(devbox.tar devbox.tar.sha256 devbox.tar.sig devbox.tar.pem sbom.cdx.json)
-          [ -f devbox.tar.intoto.jsonl ] && ASSETS+=(devbox.tar.intoto.jsonl)
-          gh release create "${{ needs.build.outputs.tag }}" \
-            --title "Monthly rebuild ${{ needs.build.outputs.tag }}" \
-            --notes-file <(./scripts/ci/release-notes.sh) \
-            "${ASSETS[@]}"
-
-  alpine-digest-check:
-    # Detects upstream alpine:3.21 digest drift against ALPINE_BACKUP_IMAGE
-    # in scripts/lib/devbox-contract.sh. If drift is detected, opens a PR
-    # bumping the digest — never auto-merges. Operators review the PR diff
-    # and decide whether to land the new digest. See docs/updating.md.
+  # Refresh image digests and pins, smoke-test them, open one PR. Never
+  # pushes to main. PRs opened with GITHUB_TOKEN do not trigger pr-validate:
+  # close and reopen the PR (or push to it) to run the full suite.
+  refresh:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Login to Docker Hub (rate-limit headroom)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Docker Hub login (skipped without secrets)
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Resolve current alpine:3.21 manifest digest
-        id: upstream
+      - name: Refresh digest locks
+        run: scripts/update-images.sh --apply
+      - name: Refresh pins (fails on vendor key rotation)
+        run: scripts/update-pins.sh --apply
+      - name: Smoke-test refreshed locks
+        run: scripts/ci/smoke-test.sh
+      - name: Describe changes
         run: |
-          set -euo pipefail
-          DIGEST="$(docker manifest inspect alpine:3.21 \
-              | jq -r '.manifests[0].digest // .config.digest // empty')"
-          if ! printf '%s' "${DIGEST}" | grep -qE '^sha256:[a-f0-9]{64}$'; then
-              echo "ERROR: failed to resolve alpine:3.21 digest" >&2
-              exit 1
-          fi
-          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
-
-      - name: Read contract ALPINE_BACKUP_IMAGE
-        id: contract
-        run: |
-          set -euo pipefail
-          LINE="$(grep '^ALPINE_BACKUP_IMAGE=' scripts/lib/devbox-contract.sh)"
-          DIGEST="$(printf '%s' "${LINE}" | sed -E 's/.*@(sha256:[a-f0-9]{64}).*/\1/')"
-          if ! printf '%s' "${DIGEST}" | grep -qE '^sha256:[a-f0-9]{64}$'; then
-              echo "ERROR: ALPINE_BACKUP_IMAGE in contract is not sha256-pinned" >&2
-              exit 1
-          fi
-          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
-
-      - name: Compare and bump if drifted
-        id: bump
-        env:
-          UPSTREAM_DIGEST: ${{ steps.upstream.outputs.digest }}
-          CONTRACT_DIGEST: ${{ steps.contract.outputs.digest }}
-        run: |
-          set -euo pipefail
-          if [ "${UPSTREAM_DIGEST}" = "${CONTRACT_DIGEST}" ]; then
-              echo "alpine digest in sync — no PR needed"
-              echo "drift=false" >> "${GITHUB_OUTPUT}"
-              exit 0
-          fi
-          echo "drift=true" >> "${GITHUB_OUTPUT}"
-          # In-place bump via sed; only the digest fragment changes.
-          sed -i -E "s|alpine@${CONTRACT_DIGEST}|alpine@${UPSTREAM_DIGEST}|g" \
-              scripts/lib/devbox-contract.sh
-          # PR body file (env-var indirection avoids workflow injection).
           {
-              printf 'Automatic bump of `ALPINE_BACKUP_IMAGE` in `scripts/lib/devbox-contract.sh`.\n\n'
-              printf '## Diff\n\n'
-              printf -- '- Previous: `alpine@%s`\n' "${CONTRACT_DIGEST}"
-              printf -- '- New:      `alpine@%s`\n' "${UPSTREAM_DIGEST}"
-              printf '\n## Review checklist\n\n'
-              printf -- '- [ ] `scripts/lib/devbox-contract.sh` is the only file changed.\n'
-              printf -- '- [ ] New digest resolves on docker.io/library/alpine (run `docker manifest inspect alpine@%s`).\n' "${UPSTREAM_DIGEST}"
-              printf -- '- [ ] No other ALPINE references introduced.\n'
-              printf '\nMerge to ship; close to defer until next monthly run.\n'
-          } > /tmp/alpine-bump-body.md
-
-      - name: Open PR for digest bump
-        if: ${{ steps.bump.outputs.drift == 'true' }}
-        uses: peter-evans/create-pull-request@v6
+            echo 'Automated monthly refresh: image digests within the pinned tags, and the Oh My Zsh pin.'
+            echo
+            echo '```diff'
+            git diff -- services/*/docker-compose.lock.yml scripts/lib/pins.sh | grep -E '^[+-] *(image:|OHMYZSH)' || echo '(no changes)'
+            echo '```'
+            echo
+            echo 'Smoke test passed on the runner. Re-run pr-validate (close/reopen) before merging.'
+          } > "${RUNNER_TEMP}/body.md"
+      - name: Open PR
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          branch: chore/alpine-digest-refresh-${{ github.run_id }}
+          branch: chore/monthly-refresh
           base: main
-          title: 'chore(contract): refresh ALPINE_BACKUP_IMAGE digest'
-          commit-message: 'chore(contract): refresh ALPINE_BACKUP_IMAGE digest'
-          body-path: /tmp/alpine-bump-body.md
+          title: 'chore: monthly image digest and pin refresh'
+          commit-message: 'chore: refresh image digests and pins'
+          body-path: ${{ runner.temp }}/body.md
           delete-branch: true
-          signoff: false
+
+  # Release main as a signed tarball. Skipped when main has not moved since
+  # the previous monthly tag; refused unless pr-validate passed on that commit.
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read     # read pr-validate results
+      id-token: write   # cosign keyless (GitHub OIDC -> Fulcio)
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Skip when main is unchanged
+        id: prev
+        run: |
+          prev=$(git tag -l 'monthly-*' --sort=-creatordate | head -n1)
+          echo "tag=${prev}" >> "$GITHUB_OUTPUT"
+          if [ -n "${prev}" ] && [ "$(git rev-parse "${prev}^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Require green pr-validate on this commit
+        if: steps.prev.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          result=$(gh run list --workflow pr-validate.yml --branch main --commit "${sha}" \
+                     --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
+          [ "${result}" -gt 0 ] || { echo "pr-validate has not passed on ${sha}; not releasing." >&2; exit 1; }
+      - name: Docker Hub login (skipped without secrets)
+        if: ${{ steps.prev.outputs.skip != 'true' && env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Smoke-test main's locks
+        if: steps.prev.outputs.skip != 'true'
+        run: scripts/ci/smoke-test.sh
+      - name: Build deterministic tarball
+        if: steps.prev.outputs.skip != 'true'
+        run: |
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+              -cf devbox.tar services scripts setup.sh Makefile ARCHITECTURE.md README.md LICENSE docs
+          sha256sum devbox.tar > devbox.tar.sha256
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: steps.prev.outputs.skip != 'true'
+      - name: Sign (cosign keyless, Sigstore bundle)
+        if: steps.prev.outputs.skip != 'true'
+        run: cosign sign-blob --yes --bundle devbox.tar.sigstore.json devbox.tar
+      - name: Publish release
+        if: steps.prev.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREV: ${{ steps.prev.outputs.tag }}
+        run: |
+          tag="monthly-$(date -u +%Y%m%d)"
+          scripts/ci/release-notes.sh "${PREV:-$(git rev-list --max-parents=0 HEAD)}" HEAD > notes.md
+          gh release create "${tag}" --target "$(git rev-parse HEAD)" --title "${tag}" --notes-file notes.md \
+            devbox.tar devbox.tar.sha256 devbox.tar.sigstore.json
