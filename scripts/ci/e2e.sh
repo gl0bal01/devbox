@@ -38,6 +38,23 @@ expect() {
     fi
     ok "$1 -> $3"
 }
+# On any failure, leave enough evidence in the log to explain it.
+diagnose() {
+    echo "== e2e failed: diagnostics" >&2
+    docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' >&2 || true
+    for c in traefik docker-socket-proxy ollama openwebui; do
+        docker inspect -f "${c}: {{json .State}}" "${c}" >&2 2>/dev/null || continue
+        docker logs --tail 60 "${c}" >&2 2>&1 || true
+    done
+    free -m >&2 || true
+}
+on_exit() {
+    local rc=$?
+    [ "${rc}" -eq 0 ] || diagnose
+    exit "${rc}"
+}
+trap on_exit EXIT
+
 # check <description> <command...> — fail the run unless the command succeeds.
 check() { local d="$1"; shift; if "$@"; then ok "${d}"; else echo "FAIL: ${d}" >&2; exit 1; fi; }
 

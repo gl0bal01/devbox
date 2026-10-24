@@ -49,7 +49,7 @@ Each installed service directory has a `.env`, mode 0600. Compose reads it autom
 | `OLLAMA_CPUS` | ollama-openwebui | Only if absent: `min(nproc, 4)` |
 | `WEBUI_SECRET_KEY`, `ENABLE_SIGNUP` | ollama-openwebui | Once, at first render. `ENABLE_SIGNUP` only seeds the first start: Open WebUI then keeps the setting in its database (Admin Panel > Settings > General). |
 
-Operator tunables for Ollama are `OLLAMA_MEM_LIMIT` (default `8g`), `OLLAMA_CPUS`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS` and `OLLAMA_CONTEXT_LENGTH` (see `services/ollama-openwebui/.env.example`). Apply them with `start-all.sh`.
+Operator tunables are `OPENWEBUI_MEM_LIMIT` (default `2g`; first boot alone uses about 850 MB) and, for Ollama, `OLLAMA_MEM_LIMIT` (default `8g`), `OLLAMA_CPUS`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS` and `OLLAMA_CONTEXT_LENGTH` (see `services/ollama-openwebui/.env.example`). Apply them with `start-all.sh`.
 
 Because `COMPOSE_FILE` is in `.env`, a plain `docker compose ps|logs|up -d` inside `~/docker/<service>/` uses the same chain as the helpers, digest lock included.
 

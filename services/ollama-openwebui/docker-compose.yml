@@ -82,8 +82,10 @@ services:
       - "traefik.http.routers.openwebui.entrypoints=web"
       - "traefik.http.routers.openwebui.service=openwebui"
       - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
-    mem_limit: 1g
-    memswap_limit: 1g
+    # First boot downloads and loads the RAG embedding model: ~850 MB RSS
+    # before any document is processed.
+    mem_limit: ${OPENWEBUI_MEM_LIMIT:-2g}
+    memswap_limit: ${OPENWEBUI_MEM_LIMIT:-2g}
     cpus: 1.0
     pids_limit: 100
     healthcheck:
@@ -91,7 +93,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 120s   # first-boot model download on slow links
+      start_interval: 5s
 
 volumes:
   ollama-data:

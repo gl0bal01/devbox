@@ -32,7 +32,7 @@ The reasons behind each design choice are in [ARCHITECTURE.md](ARCHITECTURE.md).
 - Ubuntu 24.04 (other releases get a warning and are untested).
 - Docker Engine with the Compose v2 plugin, installed beforehand (`docker-ce` + `docker-compose-plugin`, or Ubuntu's `docker.io` + `docker-compose-v2`).
 - Root access, an SSH public key and a Tailscale account.
-- Enough RAM for the models you plan to run. Ollama's memory limit defaults to 8 GB.
+- Enough RAM for the models you plan to run, plus about 2 GB for Open WebUI. Ollama's memory limit defaults to 8 GB.
 - For GPU inference: the NVIDIA driver and the NVIDIA Container Toolkit, then set `DEVBOX_GPU=nvidia`.
 
 ## Quick start
@@ -96,7 +96,7 @@ Environment variables apply on the first install. `setup.sh` saves the effective
 
 Re-running `setup.sh` is safe. It keeps the generated credentials, your `.env` edits, keys you add to `config.env`, the SSH port and the ACME state, and re-renders everything derived from them (Traefik is recreated when its static config changes). Non-critical steps (mise, Oh My Zsh, LazyVim, fail2ban) do not abort the run: setup finishes, lists the failures and exits 1.
 
-Per-service tuning lives in `~/docker/<service>/.env`. For Ollama the keys are `OLLAMA_MEM_LIMIT`, `OLLAMA_CPUS`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS` and `OLLAMA_CONTEXT_LENGTH` (see `services/ollama-openwebui/.env.example`). Apply changes with `start-all.sh`.
+Per-service tuning lives in `~/docker/<service>/.env`. Open WebUI's memory limit is `OPENWEBUI_MEM_LIMIT` (default `2g`). For Ollama the keys are `OLLAMA_MEM_LIMIT`, `OLLAMA_CPUS`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS` and `OLLAMA_CONTEXT_LENGTH` (see `services/ollama-openwebui/.env.example`). Apply changes with `start-all.sh`.
 
 ### HTTPS
 
