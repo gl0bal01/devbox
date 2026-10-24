@@ -1,71 +1,41 @@
 #!/usr/bin/env bash
-# CI smoke test: bring up each service, verify health, tear down.
-# Intended for monthly CI. Requires Docker and docker compose v2.
-# Exit non-zero on any failure.
+# Bring up each service from its digest lock, wait for health checks, tear
+# down. Runs on a scratch copy so the repo tree stays clean. Used by the
+# monthly jobs to validate refreshed locks before opening a PR / releasing.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEVBOX_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SERVICES_DIR="${DEVBOX_DIR}/services"
-
-FAIL=0
-WAIT_TIMEOUT="${SMOKE_WAIT_TIMEOUT:-120}"
-
-# CI runners start with no Docker networks. setup.sh creates these on real
-# hosts; smoke-test must do the same so `external: true` networks resolve.
-# Only remove networks we created — otherwise a dev running this on a host
-# with live services would have proxy-net yanked out from under them.
-CREATED_NETWORKS=()
-ensure_external_network() {
-    if docker network inspect "$1" >/dev/null 2>&1; then
-        return 0
-    fi
-    docker network create "$1" >/dev/null
-    CREATED_NETWORKS+=("$1")
-}
-cleanup_networks() {
-    for net in "${CREATED_NETWORKS[@]}"; do
-        docker network rm "${net}" >/dev/null 2>&1 || true
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+work=$(mktemp -d)
+created_net=false
+cleanup() {
+    local d
+    for d in "${work}"/*/; do
+        [ -f "${d}/docker-compose.yml" ] && ( cd "${d}" && docker compose down -v --remove-orphans >/dev/null 2>&1 ) || true
     done
+    ${created_net} && docker network rm proxy-net >/dev/null 2>&1 || true
+    rm -rf "${work}"
 }
-ensure_external_network proxy-net
-trap cleanup_networks EXIT
+trap cleanup EXIT
 
-for svc_dir in "${SERVICES_DIR}"/*/; do
-    svc=$(basename "${svc_dir}")
-    compose_yml="${svc_dir}/docker-compose.yml"
-    lock_yml="${svc_dir}/docker-compose.lock.yml"
-
-    if [ ! -f "${compose_yml}" ]; then
-        echo "  [SKIP] services/${svc} — no docker-compose.yml"
-        continue
-    fi
-
-    echo "Smoke testing services/${svc}..."
-
-    COMPOSE_ARGS=(-f docker-compose.yml)
-    if [ -f "${lock_yml}" ]; then
-        COMPOSE_ARGS+=(-f docker-compose.lock.yml)
-    fi
-
-    # Bring up
-    if ( cd "${svc_dir}" && \
-         docker compose "${COMPOSE_ARGS[@]}" up -d \
-             --wait --wait-timeout "${WAIT_TIMEOUT}" ); then
-        echo "  [OK] services/${svc} started and healthy"
-    else
-        echo "  [FAIL] services/${svc} failed to start or become healthy" >&2
-        FAIL=$((FAIL+1))
-    fi
-
-    # Always tear down
-    ( cd "${svc_dir}" && docker compose "${COMPOSE_ARGS[@]}" down -v ) || true
-    echo "  [OK] services/${svc} torn down"
-    echo ""
-done
-
-if [ "${FAIL}" -gt 0 ]; then
-    echo "[FAIL] ${FAIL} smoke test failure(s)." >&2
-    exit 1
+if ! docker network inspect proxy-net >/dev/null 2>&1; then
+    docker network create proxy-net >/dev/null
+    created_net=true
 fi
-echo "[OK] All smoke tests passed."
+
+fail=0
+for dir in services/*/; do
+    svc=$(basename "${dir}")
+    mkdir -p "${work}/${svc}"
+    cp -a "${dir}." "${work}/${svc}/"
+    printf 'COMPOSE_FILE=docker-compose.yml:docker-compose.lock.yml\nTAILSCALE_IP=127.0.0.1\nDEVBOX_GID=%s\nWEBUI_SECRET_KEY=%s\n' \
+        "$(id -g)" "$(openssl rand -hex 24)" >"${work}/${svc}/.env"
+    echo "-> ${svc}"
+    if ( cd "${work}/${svc}" && docker compose up -d --quiet-pull --wait --wait-timeout "${SMOKE_WAIT_TIMEOUT:-240}" ); then
+        echo "[ok]   ${svc} healthy"
+    else
+        ( cd "${work}/${svc}" && docker compose ps -a && docker compose logs --tail 50 ) || true
+        echo "[FAIL] ${svc}" >&2
+        fail=1
+    fi
+done
+exit "${fail}"

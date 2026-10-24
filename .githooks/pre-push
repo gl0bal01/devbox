@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Run the full local CI mirror before every push (enable: make hooks).
+# CI_FAST=1 git push skips the e2e install; CI still runs it.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+if [ "${CI_FAST:-0}" = 1 ]; then
+    echo "pre-push: CI_FAST=1, skipping e2e (CI will run it)" >&2
+    exec scripts/ci/local.sh --fast
+fi
+exec scripts/ci/local.sh

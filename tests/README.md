@@ -1,64 +1,43 @@
-# Devbox Test Suite
+# Tests
 
-## Overview
-
-Tests live under `tests/unit/` and use [bats-core](https://github.com/bats/bats-core) — the Bash Automated Testing System.
-
-## Installing bats
-
-**Ubuntu / Debian:**
-```bash
-sudo apt install bats
-```
-
-**npm (any platform):**
-```bash
-sudo npm install -g bats
-```
-
-**From source (latest):**
-```bash
-git clone https://github.com/bats-core/bats-core.git
-cd bats-core && sudo ./install.sh /usr/local
-```
-
-## Running tests
+The suites use [bats](https://github.com/bats-core/bats-core). Install it with `sudo apt-get install bats`.
 
 ```bash
-# All unit tests
-bats tests/unit/
-
-# Single file
-bats tests/unit/anchor-consistency.bats
-
-# Pretty output with timing
-bats --pretty tests/unit/anchor-consistency.bats
-
-# Syntax-check all test files (no bats required)
-bash -n tests/unit/*.bats
+bats tests/unit tests/contract                 # everything (CI runs exactly this)
+bats tests/unit/devbox-lib.bats                # one file
+bats -f "compose_file_chain" tests/unit        # tests whose name matches a regex
+make test                                      # lint + docs check + bats + compose chains
 ```
 
-## Test files
+| File | Covers | Needs |
+|---|---|---|
+| `tests/unit/devbox-lib.bats` | `scripts/lib/devbox-lib.sh`: secrets, atomic writes, template rendering, credentials and basic-auth hashes, `.env` editing, compose chains, the collision guard, pinned-key export, `scripts/lib/pins.sh` format | gpg, openssl, envsubst |
+| `tests/unit/htb-vpn.bats` | `scripts/host/htb-vpn.sh`: PID-file tracking, tunnel replacement, `stop` signals only an openvpn process from the PID file (an impostor PID is left alone), action-first `stop`/`status` without an .ovpn path, status | nothing extra |
+| `tests/contract/contract.bats` | The contract against the compose files as resolved by Compose: project and container names, `Host()` rules, backup exclusions, locks pin the base tags, hardening, published ports, socket mount, fail-closed variables, helper install-path resolution, `setup.sh --check` | Docker CLI (`docker compose config`; no daemon) |
+| `tests/contract/systemd.bats` | Unit templates render against a fake install and pass `systemd-analyze verify` | systemd-analyze |
 
-| File | Tests |
-|------|-------|
-| `tests/unit/parse-image-line.bats` | AWK-based image-line parser (tag/digest extraction from compose YAML) |
-| `tests/unit/fetch-verify.bats` | `scripts/lib/fetch-verify.sh` — SHA verification, tempfile cleanup, DEVBOX_ALLOW_UNVERIFIED |
-| `tests/unit/render-env.bats` | `render_env()` from `setup.sh` — template rendering, no-overwrite, mode 0600, whitelist |
-| `tests/unit/htb-vpn-pidfile.bats` | `scripts/host/htb-vpn.sh` PID file logic, escape_regex(), mocked openvpn/pkill/ip |
-| `tests/unit/anchor-consistency.bats` | `scripts/ci/check-anchor-consistency.sh` — drift detection, canonical hash |
+## Design
 
-## Shared helpers
+- The tests make no network calls and change nothing on the host. Each test works in its own `mktemp -d` directory and removes it in `teardown`.
+- `devbox-lib.bats` sources the real library. There are no copies of functions to keep in sync.
+- `htb-vpn.bats` writes fake `sudo`, `openvpn` and `ip` into a temporary directory at the front of `PATH`. The fakes record their arguments, and a sentinel file stands in for `tun0`, so no real VPN runs.
+- `contract.bats` reads JSON from `docker compose config --format json` with placeholder values for `TAILSCALE_IP`, `DOMAIN` and `WEBUI_SECRET_KEY`, so assertions see what Compose sees instead of grepping YAML.
 
-`tests/lib/test-helpers.bash` — standalone `render_env()` extracted from `setup.sh` for unit testability.
+## End-to-end install
 
-## Fixture shims
+`scripts/ci/e2e.sh` installs DevBox for real and checks the result:
 
-`tests/unit/fixtures/bin/` — fake `openvpn`, `ip`, `pkill`, `sudo` binaries written by `htb-vpn-pidfile.bats` setup(). These are prepended to `$PATH` only during that test file's execution.
+- the hardened host: sshd, UFW, fail2ban, Docker defaults;
+- the toolchain;
+- routing and basic auth through Traefik;
+- credential rotation and re-run idempotency;
+- digest pins and `security-check.sh`;
+- a backup → wipe → restore round trip;
+- the systemd units.
 
-## Design notes
+It reconfigures the machine it runs on, so it runs only on the CI runner (`.github/workflows/pr-validate.yml`, job `e2e`) or locally inside a throwaway privileged container:
 
-- No real network calls in any test. `fetch-verify.bats` uses `file://` URLs.
-- No real `openvpn` binary is invoked. Shims write their argv to a call-log.
-- `anchor-consistency.bats` operates on a `cp -r` copy of `services/` in a tmpdir.
-- The `render-env.bats` tests source `tests/lib/test-helpers.bash` directly, not `setup.sh`.
+```bash
+make e2e                               # scripts/ci/e2e-container.sh, ~15 GB of free disk
+KEEP=1 scripts/ci/e2e-container.sh     # keep the container for debugging
+```
