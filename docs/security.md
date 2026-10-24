@@ -1,320 +1,96 @@
-# Security Model and Threat Boundaries
+# Security model
 
-This document explains what devbox protects against, what it doesn't, and where the actual security boundaries are.
+This page covers what DevBox protects, where the boundaries are, and how to check them. Design rationale lives in [ARCHITECTURE.md](../ARCHITECTURE.md). Recovery steps live in [ops.md](ops.md#incident-response).
 
-## Trust Model
+## Boundaries
 
-Devbox implements a **network-centric security model**, not local privilege separation.
+The boundary is the network edge. DevBox does not try to separate privileges locally.
 
-**What IS a security boundary:**
-- **Tailscale ACL:** Only authenticated Tailscale peers can reach the services (default deny)
-- **SSH key authentication:** SSH password auth is disabled; only key-based login is allowed
-- **UFW firewall:** Host-level firewall denies all inbound except SSH (on port 5522) and UFW-managed rules
-- **Authenticated peers only:** Services are restricted to known Tailscale peers; public internet has zero access
+| Layer | What it enforces |
+|---|---|
+| UFW | Incoming traffic is denied by default. Only the SSH port (default 5522, rule comment `devbox-ssh`) is open to the internet. |
+| SSH | Key-only login. Root login, password and keyboard-interactive auth are off, and `MaxAuthTries` is 3. fail2ban watches the real SSH port. |
+| Tailscale | Every web service listens only on the host's Tailscale IP. Your tailnet ACLs decide who can reach that IP. |
+| Traefik | Every entrypoint adds security headers and an allowlist of Tailscale ranges (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) plus loopback. The Ollama API and the Traefik dashboard also require basic auth. |
 
-**What is NOT a security boundary:**
-- **Local privilege separation:** The `dev` user in the `docker` group has root-equivalent access (can bind-mount `/` as root)
-- **Sudoers rules alone:** Restrictive sudoers rules are enforced but don't prevent docker-group privilege escalation
-- **Container isolation:** Exegol and other containers run with relaxed security options (AppArmor disabled, minimal capabilities) intentionally for tool functionality; container escape may grant host access
-- **Credential file encryption:** By default, `.devbox-credentials` is stored plaintext on disk; optional GPG/age encryption is available but not enforced
+These are not boundaries:
 
-## Privilege Boundaries
+- **The `docker` group is root-equivalent.** Anyone who can run `docker` can mount `/` into a container. The operator user is in `docker` and `sudo` by design, so a stolen operator SSH key means root on the host.
+- **The NOPASSWD sudoers entries** in `/etc/sudoers.d/90-<user>` (`ufw`, `tailscale`, `openvpn`, `sshd -T`, and `pkill -F /run/devbox/htb-vpn.pid openvpn`) are there so the helpers don't prompt for a password. They don't restrict anything. Every other sudo command still asks for the user's password.
+- **Exegol containers** are pentest environments. They use host networking, and run privileged if you ask for it. Treat them as part of the host.
 
-### Docker Group Membership (Root-Equivalent)
+Multi-user hosts: any local account can reach the Docker bridge networks, so it can talk to Ollama directly at its container IP (bypassing the basic auth) and to Open WebUI before its admin exists. DevBox assumes a single-operator server; don't give other people shell accounts on it.
 
-The `dev` user is in the `docker` group, which grants **root-equivalent access** on the host. This is by design:
+Out of scope: physical access, kernel or container-runtime escapes, a compromised Tailscale account, and a malicious upstream image release that a digest refresh then pins (review the monthly refresh PR before merging it). Keep the OS patched and check the tailnet's device list regularly.
 
-```bash
-# From docker group membership, an attacker can:
-docker run -it --rm -v /:/host ubuntu /bin/bash
-# Now inside the container:
-chroot /host /bin/bash
-# You now have root access on the host
-```
+## Network exposure
 
-This is not a limitation of devbox; it's a fundamental Docker design. The docker socket provides unrestricted access to the Docker daemon, which allows binding the entire filesystem.
+Docker-published ports bypass UFW, because Docker inserts its own iptables rules ahead of UFW's. DevBox handles this as follows:
 
-**Acceptance of this risk:**
-- The security boundary is the **Tailscale ACL + SSH hardening**, not local privilege separation
-- If the SSH key is compromised, the attacker has full root access
-- If the Tailscale account is compromised, the attacker has full network access to all services
-- Local privilege escalation (via docker, kernel exploit, etc.) is out of scope
+- Only Traefik publishes ports, and only on `TAILSCALE_IP`: port 80, plus 443 in HTTPS mode. If `TAILSCALE_IP` is unset, the compose files refuse to start instead of falling back to `0.0.0.0`.
+- Ollama, Open WebUI and docker-socket-proxy publish nothing. Open WebUI reaches Ollama directly on the `proxy-net` Docker network.
+- `/etc/sysctl.d/60-devbox.conf` sets `net.ipv4.ip_nonlocal_bind=1`. At boot, Docker can then bind the Tailscale IP before `tailscale0` exists. Without it, Traefik would fail to start after a reboot.
+- `security-check.sh` fails if any container publishes on `0.0.0.0` or `::`.
 
-### Sudoers Whitelist
+To expose a new service, route it through Traefik with a `Host(...)` label. Never add a `ports:` entry. Host processes that listen on all interfaces, such as Exegol's noVNC desktop, are filtered by UFW like any other host process.
 
-Sudoers is configured with explicit NOPASSWD rules for necessary privileged commands:
-```
-dev ALL=(root) NOPASSWD: /usr/sbin/ufw, /usr/bin/tailscale, /usr/sbin/openvpn
-dev ALL=(root) NOPASSWD: /bin/systemctl restart docker, /bin/systemctl reload ufw
-dev ALL=(root) PASSWD: ALL
-```
+If you install with `DEVBOX_ALLOW_NO_TAILSCALE=true`, services bind to `127.0.0.1`. You can then reach them only through SSH port forwarding.
 
-These rules enforce that certain commands (firewall, VPN, Tailscale) don't require entering a password repeatedly. They are **not** a security boundary but a convenience feature. The `dev` user's root-equivalent docker access supersedes any sudoers restrictions.
+## Hardening in place
 
-## Threat Model (In-Scope vs Out-of-Scope)
+- **SSH:** the drop-in is `/etc/ssh/sshd_config.d/00-devbox.conf`. The `00-` prefix matters: sshd keeps the first value it reads, and cloud images ship `50-cloud-init.conf` with `PasswordAuthentication yes`. setup.sh validates the drop-in with `sshd -t` and checks the effective config with `sshd -T`. It confirms sshd is listening on the configured port before touching UFW, and rolls back if any step fails.
+- **Containers:** all run with `no-new-privileges` and `cap_drop: ALL`. Traefik adds back only `NET_BIND_SERVICE`, and Ollama only `SYS_RESOURCE`. Every container has memory, CPU and PID limits and a health check. Traefik's root filesystem is read-only.
+- **Docker socket:** Traefik reaches Docker only through docker-socket-proxy. The proxy exposes a read-only API subset (no `POST`, no exec) on an internal network. It is the only container that mounts `/var/run/docker.sock`, and it mounts it read-only.
+- **Logs:** container logs rotate host-wide (json-file, 10 MB x 3, in `/etc/docker/daemon.json`), unless you already configured a log driver. Traefik logs to stdout, access log included.
 
-### In-Scope Threats (Mitigated)
+## Supply chain
 
-**Tailscale network compromise:**
-- Attacker gains access to a Tailscale account and joins the network
-- **Mitigation:** Tailscale ACL restricts access to known peers by IP
-- **Action required:** Monitor Tailscale dashboard for unexpected peers; revoke compromised devices immediately
+| Component | How it is pinned |
+|---|---|
+| Container images | A tag in `docker-compose.yml` plus a digest lock in `docker-compose.lock.yml`. The lock is always part of `COMPOSE_FILE`, and `security-check.sh` fails any container whose image is not digest-pinned. See [updating.md](updating.md#container-images). |
+| Tailscale, mise | Vendor apt repositories. Before setup.sh writes the keyring, it checks each signing key against the fingerprint in `scripts/lib/pins.sh`. apt then verifies every package, and unattended-upgrades installs updates from both repositories automatically. |
+| Dev toolchain, AI CLIs, Exegol CLI | Installed by mise, which verifies checksums (plus cosign, SLSA or GitHub attestations where the vendor publishes them). Versions float to the latest stable release at install time. |
+| Oh My Zsh | Fixed commit in `scripts/lib/pins.sh`. In-shell auto-update is disabled. |
+| LazyVim | Only the starter template is installed. lazy.nvim fetches the plugins, unpinned, on first launch. |
+| Release tarball | Built monthly and signed with cosign keyless. See [updating.md](updating.md#install-from-a-signed-release). |
 
-**SSH key compromise (stolen, leaked):**
-- Attacker obtains the SSH private key (e.g., from a laptop backup)
-- **Mitigation:** SSH key-only auth; password bruteforce is impossible
-- **Action required:** Revoke the key immediately (remove from `authorized_keys`), generate a new key, re-deploy
+DevBox does not pin Exegol images. They come from the Exegol CLI.
 
-**Upstream image registry compromise:**
-- Docker Hub, GitHub Container Registry, or Ollama upstream is compromised and returns malicious images
-- **Mitigation:** ARCHITECTURE.md (digest pinning) ensures exact images are deployed; malicious image would need to match the pinned digest
-- **Action required:** Monthly CI smoke test (ARCHITECTURE.md) detects obvious breakage; cosign signature verification (ARCHITECTURE.md) confirms build provenance
+## Credentials
 
-**Setup.sh download compromise:**
-- Bun, Rustup, Tailscale, or other installer URLs are MITM'd or registry is compromised
-- **Mitigation:** ARCHITECTURE.md (fetch_and_verify) pins SHA256 of installers; hash mismatch blocks installation
-- **Action required:** Emergency `DEVBOX_ALLOW_UNVERIFIED=1` override documented in docs/ops.md
+| Secret | Location (mode 0600) | How to rotate |
+|---|---|---|
+| Ollama API basic auth | `~/docker/.secrets/ollama-auth.txt` (`ollama:<password>`) | Run `~/docker/rotate-ollama-auth.sh`. Traefik picks up the change within seconds and Open WebUI is unaffected. Then update your clients. |
+| Traefik dashboard basic auth | `~/docker/.secrets/traefik-dashboard.txt` (`admin:<password>`) | Delete the file, then run `sudo ./setup.sh` from your checkout. A new credential is generated and the middleware re-rendered. |
+| Open WebUI session key | `WEBUI_SECRET_KEY` in `~/docker/ollama-openwebui/.env` | Replace the value (for example with `openssl rand -hex 32`), then run `~/docker/start-all.sh`. Everyone is logged out. |
+| Operator password (only when setup created the user) | `~/docker/.secrets/user-password.txt` | Store it somewhere safe and delete the file. Change it with `passwd` if you like. |
+| OVH API token (HTTPS mode) | `~/.config/devbox/ovh.env`, copied to `~/docker/traefik/ovh.env` | Create a new token and edit `~/.config/devbox/ovh.env`. Run `sudo ./setup.sh` and `~/docker/start-all.sh`, then revoke the old token at OVH. |
 
-**Hand-edit clobbering (accidental data loss):**
-- Operator edits `~/docker/traefik/traefik.yml` and re-runs `setup.sh`, losing the edits
-- **Mitigation:** ARCHITECTURE.md (pre-rsync snapshots) backs up `~/docker/` before rsync
-- **Action required:** Restore from `~/.local/share/devbox/backups/<timestamp>/` (documented in docs/ops.md)
+`~/docker/.secrets/` is mode 0700. The middlewares in `~/docker/traefik/dynamic/*-auth.yml` hold apr1 hashes of these credentials. They are mode 0640, and Traefik reads them through the operator's group (`group_add` with `DEVBOX_GID`). setup.sh re-renders them on every run, so don't edit them by hand. Backups contain all of the secrets above, so [encrypt them](ops.md#encryption).
 
-### Out-of-Scope Threats (Not Mitigated)
+## Open WebUI accounts
 
-**Physical access:**
-- Attacker has physical access to the server
-- **Why out-of-scope:** No security can protect against physical access (disk can be removed, BIOS can be reset)
-- **Recommendation:** Server should be in a physically secure location (data center, locked cabinet)
+The first account you create at `http://ai.internal` becomes the admin. setup.sh starts with signup open so that you can create it.
 
-**Kernel exploits / zero-days:**
-- Attacker finds a CVE in the Linux kernel and exploits it to gain root
-- **Why out-of-scope:** No application-level mitigation possible; requires kernel patches
-- **Recommendation:** Keep the OS patched; subscribe to Ubuntu security mailing list
+After that, turn off new sign-ups in **Admin Panel → Settings → General**. Do this in Open WebUI itself. After the first start, Open WebUI stores the setting in its database, so changing `ENABLE_SIGNUP` in `.env` has no effect on an existing install. `security-check.sh` reads the live setting from the running app.
 
-**Container escape:**
-- Attacker runs code in a container (Exegol, Ollama, etc.) and exploits a Docker/containerd bug to reach the host
-- **Why out-of-scope:** Container security is a shared responsibility of Docker, kernel, and application configuration
-- **Partially mitigated:** Security options (`no-new-privileges`, `cap_drop: ALL`, selective `cap_add`) reduce attack surface; however, Exegol intentionally disables AppArmor for tool functionality
-- **Recommendation:** Keep Docker and the kernel patched; don't run untrusted container images
+While signup is open, anyone who can reach `ai.internal` can register. By default, Open WebUI gives new accounts the `pending` role until an admin approves them.
 
-**Exegol upstream compromise:**
-- ThePorgs/Exegol project is compromised and releases a malicious image
-- **Why out-of-scope:** Exegol is a pentesting container intentionally running arbitrary tools; any additional trust verification is minimal value
-- **Accepted risk:** Documented in ARCHITECTURE.md; operator accepts that Exegol is untrusted-by-design
-- **Recommendation:** Review Exegol releases periodically; pin a specific known-good digest if reproducibility is critical
-
-**GitHub Actions compromise:**
-- GitHub Actions infrastructure is compromised; malicious `monthly-rebuild.yml` is deployed
-- **Why partially out-of-scope:** GitHub Actions is infrastructure you don't control
-- **Partially mitigated:** SLSA provenance (ARCHITECTURE.md) attests the build environment; operator can verify against GitHub's public logs
-- **Recommendation:** Review cosign signatures carefully; if suspicious, re-build and sign the release locally
-
-**Supply-chain attack on CI dependencies:**
-- A GitHub Actions action (e.g., `cosign-installer`, `slsa-github-generator`) is compromised
-- **Why out-of-scope:** Actions are third-party code; no devbox-level mitigation possible
-- **Partially mitigated:** All action versions are pinned (ARCHITECTURE.md); known-good versions are committed
-- **Recommendation:** Audit action code before updating; monitor for security announcements
-
-## Incident Response
-
-### SSH Key Compromise
-
-1. **Immediately revoke the compromised key:**
-   ```bash
-   # On the server, remove the old key
-   ssh-keygen -f ~/.ssh/authorized_keys -R "$(cat ~/.ssh/authorized_keys)"
-   # Or manually edit ~/.ssh/authorized_keys and remove the public key
-   ```
-
-2. **Generate a new SSH key (on your laptop):**
-   ```bash
-   ssh-keygen -t ed25519 -C "devbox@$(hostname)" -f ~/.ssh/devbox -N "passphrase"
-   ```
-
-3. **Deploy the new key:**
-   ```bash
-   # Temporarily enable password auth or use an alternate access method
-   # Then update authorized_keys with the new public key
-   ```
-
-4. **Verify access works with the new key:**
-   ```bash
-   ssh -i ~/.ssh/devbox dev@devbox
-   ```
-
-5. **Disable the old key completely and destroy it:**
-   ```bash
-   shred -u ~/.ssh/devbox.old
-   ```
-
-### Tailscale Account Compromise
-
-1. **From the Tailscale web console, revoke the device:**
-   - Go to https://login.tailscale.com/admin/machines
-   - Find the device and click "Delete"
-
-2. **On the server, run Tailscale auth again:**
-   ```bash
-   sudo tailscale logout
-   sudo tailscale up
-   ```
-
-3. **Verify the new device appears in the console and has the correct IP**
-
-4. **Monitor the Tailscale network for unexpected new devices**
-
-### Upstream Image Compromise Detection
-
-If `docker compose up -d --wait` fails on a service, check:
+## Checking it: security-check.sh
 
 ```bash
-# Review recent digest changes
-git log --oneline services/ | head -10
-
-# Compare current lockfile with what CI generated
-docker compose -f services/traefik/docker-compose.yml -f services/traefik/docker-compose.lock.yml config | grep image
-
-# Check if the service is obviously broken
-docker compose logs traefik | tail -50
-
-# If suspicious, revert the last commit
-git revert HEAD
-docker compose up -d
+~/docker/security-check.sh     # exit 1 if any check FAILs
 ```
 
-## Credential Management
+The script is read-only. It uses the passwordless `sudo ufw` and `sudo sshd -T` entries that setup.sh installs.
 
-### Plaintext Storage
-
-By default, `.devbox-credentials` (NOPASSWD file for Ansible/helper tools) is stored plaintext in `~/.devbox-credentials`. This file contains:
-- Generated user backup password (if `dev` was newly created)
-- Open WebUI session secret (`WEBUI_SECRET_KEY`)
-- Traefik dashboard credentials (`admin` + generated password)
-- Ollama API basic-auth credentials (`ollama` + generated 32-char password) — also persisted at `${DEVBOX_HOME}/.secrets/ollama-auth.txt` for `rotate-ollama-auth.sh`
-
-**Risk:** If the disk is readable by another user or compromised, credentials are exposed.
-
-**Mitigation:**
-- File is readable only by `dev:dev` (0600 permissions)
-- Umask is set to 077 when creating the file (ARCHITECTURE.md)
-- If GPG keys are present, the file is encrypted to `~/.devbox-credentials.gpg` automatically
-
-**Recommendation:**
-- If credentials are sensitive, enable GPG encryption (`gpg --list-keys` must return at least one key)
-- Rotate credentials regularly
-- Do not share the server with untrusted users
-- Use Tailscale SSH (if available) instead of long-lived SSH keys where possible
-
-### OVH Credentials (HTTPS Mode)
-
-If `ENABLE_HTTPS=true`, OVH API credentials are read from:
-```
-${XDG_CONFIG_HOME:-$HOME/.config}/devbox/ovh.env
-```
-
-This file must contain:
-```
-OVH_ENDPOINT=ovh-eu
-OVH_APPLICATION_KEY=...
-OVH_APPLICATION_SECRET=...
-OVH_CONSUMER_KEY=...
-```
-
-**Risk:** Credentials are plaintext; if the file is readable, credentials are exposed.
-
-**Mitigation:**
-- File permissions are enforced to 0600 (readable only by owner)
-- File is NOT tracked in git (added to `.gitignore`)
-- File is NOT backed up by default (Scenario E in pre-mortem)
-
-**Recommendation:**
-- Restrict `/etc/sudoers.d/` so only `dev` can read it (already done)
-- Encrypt the file locally using GPG or age if storing on a shared system
-- Rotate OVH credentials periodically
-- Use dedicated OVH accounts for this infrastructure (not personal accounts)
-
-## Scenario E: Partial Install Leaks Credentials
-
-From the pre-mortem: if `setup.sh` is interrupted (SIGINT) between credential file creation and `chmod 600`, the plaintext credentials file could be left world-readable.
-
-**Mitigations:**
-- `umask 077` at the top of setup.sh (default umask creates 0700 files)
-- `install -m 0600 /dev/null ~/.devbox-credentials` (atomic permissions before any content)
-- `trap 'shred -u "${CREDS_FILE}" 2>/dev/null || true' INT TERM` (cleanup on signal)
-
-**Verification:**
-```bash
-# Check for world-readable credential files
-find ~ -maxdepth 1 -name '.devbox-credentials*' -perm /044
-# Should return nothing (empty)
-```
-
-## Security Hardening Checklist
-
-Run this after every install to verify the security model is in place:
-
-```bash
-# 1. Verify SSH key-only auth
-sudo sshd -T | grep -E "^passwordauthentication|^pubkeyauthentication"
-# Should show: passwordauthentication no, pubkeyauthentication yes
-
-# 2. Verify UFW is active and denies by default
-sudo ufw status
-# Should show: Status: active, Default: deny (incoming), allow (outgoing), disabled (routed)
-
-# 3. Verify docker group membership
-id dev
-# Should show: groups=...,docker,...
-
-# 4. Verify Tailscale is connected
-tailscale status | grep -E "^[[:space:]]+.*online"
-
-# 5. Verify .env file permissions
-ls -la ~/docker/*/.env
-# Should show: -rw------- (0600)
-
-# 6. Verify sudoers whitelist
-sudo -l
-# Should show only ufw, tailscale, openvpn, systemctl commands allowed NOPASSWD
-
-# 7. Verify no credential files are world-readable
-find ~ -maxdepth 1 -name '*.devbox-credentials*' -perm /044 || echo "OK: no world-readable creds"
-
-# 8. Verify Traefik middleware are wired at entryPoint level (ARCHITECTURE.md)
-docker exec traefik cat /etc/traefik/traefik.yml | grep -A 5 "entryPoints:" | head -20
-```
-
-## Ollama API basic auth (ollama-auth@file)
-
-The Traefik route for `http://ollama.internal` (and `https://ollama.${DOMAIN}` in HTTPS mode) is protected with HTTP basic auth via the `ollama-auth@file` middleware.
-
-**Key properties:**
-
-- The basic-auth credential is generated **per install** by `setup.sh`: a random 32-character password plus an APR1 hash.
-- The hash lives in `${DEVBOX_HOME}/traefik/dynamic/ollama-auth.yml` (mode 0600, owned by `dev`).
-- The plaintext credential lives in `${DEVBOX_HOME}/.secrets/ollama-auth.txt` (mode 0600) in the form `ollama:<password>`. The `.secrets/` directory itself is mode 0700.
-- The route is bound to the Tailscale entrypoint only; there is no public 0.0.0.0 bind for Ollama.
-
-**Open WebUI is NOT affected by rotation.** Open WebUI reaches the Ollama backend on the internal Compose network (`http://ollama:11434`, defined in `services/ollama-openwebui/docker-compose.yml`). That path does not traverse Traefik and does not present credentials. Only external Tailscale clients of `http://ollama.internal` use the basic-auth credential.
-
-**Rotation:**
-
-```bash
-~/docker/rotate-ollama-auth.sh
-# Writes a new random password to:
-#   ~/docker/traefik/dynamic/ollama-auth.yml   (mode 0600, new hash)
-#   ~/docker/.secrets/ollama-auth.txt          (mode 0600, new plaintext)
-# Traefik file provider auto-reloads on file change. Open WebUI keeps working.
-```
-
-After rotation, any external client (IDE plugins, curl, scripts) must read the new credential from `~/docker/.secrets/ollama-auth.txt`.
-
-## Further Reading
-
-- **ARCHITECTURE.md:** Docker group privilege model (detailed explanation)
-- **ARCHITECTURE.md:** Cosign keyless and supply-chain verification
-- **ARCHITECTURE.md:** Verified downloads and SHA pinning
-- **ARCHITECTURE.md:** Image digest pinning
-- **docs/ops.md:** Incident response runbook and backup/restore procedures
-- **CONTRIBUTING.md:** Contributing to devbox securely
+| Check | FAIL or warning means | Fix |
+|---|---|---|
+| No container publishes on `0.0.0.0` / `::` | A container is reachable from the internet despite UFW | Remove the `ports:` entry, or bind it to the Tailscale IP |
+| Host listeners on all interfaces (warning) | A host process listens on all interfaces. UFW filters it. Exegol noVNC shows up here as expected. | Check that it's intended: `sudo ss -ltnp` |
+| UFW active, default deny incoming | The firewall is off or permissive | Re-run `sudo ./setup.sh` |
+| sshd: port, `passwordauthentication no`, `permitrootlogin no`, `kbdinteractiveauthentication no` | Another file overrides the drop-in, or the port changed | Re-run `sudo ./setup.sh`. It names the overriding file if there is one. |
+| Each container: running, healthy, `no-new-privileges`, caps dropped, memory limit, not privileged, digest-pinned | The stack is stopped or unhealthy, or it was started without the lock file | `~/docker/start-all.sh`. Use compose only from inside `~/docker/<service>`. |
+| Only docker-socket-proxy mounts `docker.sock` (warning) | Another container can control Docker, which is root-equivalent | Remove that mount |
+| Secret file modes (700 for `.secrets`, 600 for secret files, 640 for the `*-auth.yml` middlewares) | Credentials are readable by other users | `chmod` to the expected mode, or re-run setup |
+| Open WebUI sign-up open, leftover `user-password.txt` (warnings) | The running Open WebUI still accepts sign-ups (it checks `/api/config`), or the generated password is still on disk | See [Open WebUI accounts](#open-webui-accounts) and [Credentials](#credentials) |

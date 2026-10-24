@@ -1,363 +1,273 @@
-# Devbox Architecture
-
-This document captures the load-bearing design decisions for devbox, replacing
-the per-decision ADR set under `docs/adr/` with a single readable reference.
-Each section names a decision, why it was chosen, what was rejected, and the
-trade-offs accepted.
-
-## Trust Model
-
-**Decision.** Devbox uses a network-centric trust model, not local privilege separation.
-
-The security boundary is **Tailscale ACL + SSH key auth + UFW default-deny**. Inside
-that boundary, the `dev` user is in the `docker` group, which grants root-equivalent
-access to the host (the docker socket can bind-mount `/` as root). This is an
-intentional, documented fact, not a flaw.
-
-**Drivers.** Forcing rootless docker would block many pentest tools and add 30+ minutes
-of operational friction per install. Tailscale + SSH key auth is a stronger boundary
-than sudoers theater because it actually prevents reach.
-
-**Rejected.** Rootless docker (operational cost too high); sudoers-only "least privilege"
-(false security — docker socket bypasses it); userns-remap (complicates volume mounts,
-incompatible with several pentest tools).
-
-**Consequences.** SSH key compromise → full root. Tailscale account compromise → full
-LAN access. Local privilege escalation is out of scope. `docs/security.md` documents
-this explicitly.
-
-## Install Layout
-
-**Decision.** `setup.sh` is a host bootstrapper. The source of truth is the git repo
-(`services/`, `scripts/host/`, `scripts/lib/`, `scripts/systemd/`); `setup.sh` rsyncs
-into `${HOME}/docker/`, renders `.template` files, writes `.devbox-marker` and
-`~/.config/devbox/config.env`, and exits. Helpers run from `${HOME}/docker/`.
-
-**Drivers.** v3 setup.sh was 2072 lines of heredocs and inline configuration that
-silently diverged from the tracked files. Moving everything to tracked files makes
-diff review and CI possible. The bootstrapper shrank to <1000 lines.
+# DevBox Architecture
 
-**Rejected.** Symlinks from `${HOME}/docker/` back into the repo (operator confusion,
-permission issues); install-script generates everything from heredocs (the v2 design,
-unmaintainable).
-
-**Consequences.** Operators must NOT hand-edit `${HOME}/docker/` — `setup.sh` overwrites
-it on re-run. Hand edits are recoverable from `~/.local/share/devbox/backups/` snapshots
-taken before each rsync (intentional design). The collision guard in `setup.sh` refuses
-to install into a non-devbox `${HOME}/docker/` tree (allowlist + `.devbox-marker` for
-upgrade-in-place).
+This file records the decisions that shape DevBox. Each entry gives the decision, the drivers behind it, the alternatives that were rejected, and the consequences that were accepted. Read the relevant entry before you change install layout, networking, HTTPS, pinning, downloads, backups, systemd or CI, and update the entry when the decision changes. Usage instructions are in [README.md](README.md).
 
-## Runtime Contract
+## Trust boundary: the network, not local privilege
 
-**Decision.** `scripts/lib/devbox-contract.sh` is the canonical source of install layout,
-service identities, container names, Traefik hosts, named volumes, backup targets, and
-the pinned alpine digest. Setup.sh installs a copy into `${DEVBOX_HOME}/lib/`; helpers
-source the installed copy and consume contract accessors (`devbox_get`,
-`devbox_compose_chain_for`, `devbox_compose_chain_key`, `devbox_contract_warn_drift`).
+**Decision.** The security boundary is Tailscale ACLs plus SSH key authentication plus UFW deny-by-default. Inside that boundary the operator is in the `docker` group, which is equivalent to root. The NOPASSWD sudo entries in `/etc/sudoers.d/90-<user>` (ufw, tailscale, openvpn, `sshd -T`, and `pkill -F /run/devbox/htb-vpn.pid openvpn`) exist so the helpers can run without a password prompt. They are not a privilege boundary.
 
-The installed copy is the runtime authority. Helpers print a non-blocking WARN if the
-repo copy differs (drift detected by `cmp -s`).
+**Drivers.** Exegol and most pentest tooling need privileged Docker. A boundary that prevents reach is worth more than local separation that the Docker socket bypasses anyway.
 
-**Drivers.** Pre-contract, `setup.sh` installed services into `~/docker/<svc>` but
-helpers iterated `~/docker/devbox/services/<svc>`; var names disagreed (`ENABLE_HTTPS`
-vs `HTTPS_ENABLED`). Every fresh install silently skipped every service. The contract
-fixes the class of bug by giving everyone one shape to read from.
+**Rejected.** Rootless Docker and userns-remap: both break Exegol and volume ownership. A sudoers allowlist presented as least privilege: false security next to the Docker socket.
 
-**Rejected.** YAML config + shell parser (adds parser dependency); duplicate constants
-across setup.sh + each helper (the original drift source); environment-variable-only
-(no canonical declaration site).
+**Consequences.**
+- Compromise of the operator account or its SSH key means root.
+- A compromised tailnet device can reach the services. Basic auth on the Ollama API and the Traefik dashboard, and the Open WebUI login, still stand in the way.
+- Local privilege escalation is out of scope. [docs/security.md](docs/security.md) states this to operators.
 
-**Consequences.** Helpers refuse to run without the installed contract. `setup.sh` is
-the only sync path between repo and installed copies. Bats contract tests pin the
-shape: every `Host(*.internal)` literal has a router; every named volume is backed up;
-every container_name matches `security-check.sh`; emitted config.env keys ⊇
-helper-read keys. Contract version bumps (currently v2) signal schema changes.
+## Bootstrapper and installed tree
 
-## HTTPS via Compose Override (Tailscale-Bound)
+**Decision.** The repository is the source of truth. `setup.sh` converges the host, syncs `services/`, `scripts/host/`, `scripts/lib/` and `scripts/systemd/` into `~/docker/`, renders templates, writes `~/.config/devbox/config.env` and the install marker, and exits. Helpers run from `~/docker/` and locate the install from their own path. Installed files fall into three classes:
 
-**Decision.** HTTPS support is an opt-in Compose override file
-(`services/<svc>/docker-compose.https.yml`), enabled by `ENABLE_HTTPS=true` in
-`~/.config/devbox/config.env`. The override adds `tls=true` plus
-`certresolver=letsencrypt` per router and binds port 443 to `${TAILSCALE_IP}` —
-**no public 0.0.0.0 bind**. Both HTTP (port 80) and HTTPS (port 443) are Tailscale-only.
-Certificates come from Let's Encrypt via OVH DNS-01 (credentials in
-`~/.config/devbox/ovh.env`, never tracked).
+- **Tracked:** mirrored with `rsync --delete` on every run.
+- **Operator-owned:** each service `.env`, `ovh.env` and the credentials in `.secrets/`. Created once, never overwritten.
+- **Derived:** the basic-auth middlewares, the HTTPS `traefik.yml`, the keys setup manages inside `.env` (`COMPOSE_FILE`, `TAILSCALE_IP`, `DEVBOX_GID`, `DOMAIN`) and its own keys in `config.env`. Rendered or upserted again on every run from persisted state.
 
-**Drivers.** Want TLS for clients that demand HTTPS without exposing the listener to
-the public internet. DNS-01 avoids requiring port 80 reachable from the public
-internet.
+**Drivers.** Configuration generated from heredocs inside the installer drifted from the tracked files and could not be reviewed or tested. Because re-running setup is the upgrade path, every run must converge and must preserve operator state.
 
-**Rejected.** Single compose file with TLS toggle (couples concerns); ACME HTTP-01
-challenge (would require public port 80); self-signed certs (browser friction).
+**Rejected.** Heredoc-generated configuration. Symlinking `~/docker` into the checkout: it ties the runtime to a working tree and causes permission problems. Running helpers from the repository.
 
-**Consequences.** Operators on the Tailnet hit `https://ai.internal` (and
-`https://ai.${DOMAIN}`) and get a valid public cert. Off-Tailnet clients cannot reach
-the listener at all. OVH credentials live outside the repo at `~/.config/devbox/ovh.env`
-(mode 0600). README and `docs/updating.md` document this.
+**Consequences.**
+- Hand edits to tracked files under `~/docker` are lost on the next run. Tuning goes in `.env`.
+- Host files that setup replaces (sudoers, `daemon.json`, the sshd drop-in, `.zshrc`, `config.env`) are copied to `~/.local/share/devbox/backups/setup-<time>/` first.
+- A collision guard refuses a non-empty `~/docker` that holds entries DevBox does not own, unless it is a prior install (contract and marker both present).
+- Root never sources operator-owned files. `config.env` and `ovh.env` are parsed with `sed`. Setup upserts only its own keys in `config.env`, so keys the operator adds (such as `BACKUP_GPG_RECIPIENT`) survive.
+- Setup records the operator in `/etc/devbox/operator`, a root-owned file with mode 0644 in a root-owned directory. When `DEVBOX_USER` is unset, re-runs read the operator from that file, and only if its ownership and mode are intact; otherwise they fall back to `dev`. The operator is never inferred from user-writable paths such as install markers, which any local user could plant. Installs made before this file existed need `DEVBOX_USER` once if the operator is not `dev`.
 
-## Image Pinning + Digest Lockfiles
+## Preflight first, lockdown last
 
-**Decision.** Base `services/*/docker-compose.yml` files pin images by exact minor tag
-(`traefik:v3.7`, `open-webui:0.11`), or by exact patch tag where upstream publishes no
-minor tag (`ollama/ollama:0.33.3`, `docker-socket-proxy:v0.5.0`). A generated `docker-compose.lock.yml` per
-service pins by sha256 digest (`traefik@sha256:...`). Setup.sh emits compose chains as
-`docker-compose.yml[:docker-compose.https.yml][:docker-compose.lock.yml]` so the
-lockfile is always loaded when present. `scripts/update-images.sh` refreshes lockfiles: pass one resolves digests from the
-base file ONLY (chaining the old lock would let its digest override the tag, so nothing
-would ever refresh; this was a real bug until 2026-09), pass two chains the result to
-normalize to `name@sha256` form. CI gates on `update-images.sh --check`.
+**Decision.** A read-only preflight checks everything before the first change: root, OS, Docker and Compose, the GPU runtime, the SSH key, HTTPS inputs, the Tailscale path under `--yes`, and the collision guard. It reports every failure in one pass. `--dry-run` runs the same checks. SSH and firewall changes come last, in this order:
 
-**Drivers.** Reproducibility: a tag can move but a digest cannot. Trust but verify:
-operators see what's actually running.
+1. Write the sshd drop-in `/etc/ssh/sshd_config.d/00-devbox.conf`.
+2. Validate it with `sshd -t`, then check the effective settings with `sshd -T`.
+3. Restart sshd, restarting `ssh.socket` when socket activation is enabled.
+4. Wait until sshd listens on the new port.
+5. Only then change UFW.
 
-**Rejected.** Tag-only (mutable, no reproducibility); digest-only in base file (loses
-auto-patch updates); hand-maintained lock files (drift).
+Any failure in steps 2 to 4 restores the previous drop-in.
 
-**Consequences.** Monthly CI runs `update-images.sh --apply` and produces a smoke-tested
-monthly-* release. Operators on `main` get the latest lockfile on every monthly run. Major
-version bumps (e.g., `v3.7 → v4.0`) are manual base-file edits.
+**Drivers.** On a remote host, a half-applied run is the worst outcome, and the classic failure is an SSH lockout. sshd keeps the first value it reads, and cloud images ship `50-cloud-init.conf` with `PasswordAuthentication yes`, so a `99-` drop-in silently loses. On Ubuntu 22.10 and later, sshd is socket-activated, so restarting `ssh.service` alone does not move the port.
 
-## Tag Strategy: Minor-Pinned, Operator-Bumped Majors
+**Rejected.** Stopping at the first error, which costs one run per fix. A `99-hardening.conf` drop-in. Relying on `sshd -t`, which validates syntax but not which file wins. Enabling UFW before the new port is confirmed.
 
-**Decision.** Image tags in the base compose file are minor-pinned (`traefik:v3.7`).
-Monthly CI runs `--apply` and refreshes digests within the minor — operators get patch
-fixes automatically. Major version bumps are manual: operator edits the tag, runs
-`--apply`, smoke-tests, commits.
+**Consequences.**
+- Setup refuses to run without an SSH public key, because password login is disabled at the end.
+- UFW converges instead of being reset: the SSH rule is tagged `devbox-ssh`, and rules the operator adds (such as Exegol ports) survive re-runs. Foreign rules are listed and only removed if the operator answers yes interactively; `--yes` keeps them.
+- Upgrades never move sshd implicitly: the port comes from `DEVBOX_SSH_PORT`, else `config.env`, else the legacy `99-hardening.conf`, else 5522. Rollback restores both our drop-in and the legacy one, and the listener check requires sshd (or systemd's socket) on the port; preflight rejects a port held by another process.
+- Non-critical steps (mise, Oh My Zsh, LazyVim, fail2ban) are collected, and setup exits 1 after finishing.
+- A lock in `/run/devbox-setup.lock` (root-only directory, unlike `/run/lock`) prevents concurrent runs.
 
-**Drivers.** Patches usually contain security fixes (want them automatic). Majors
-usually break things (require manual review).
+## Runtime contract
 
-**Rejected.** Tag-by-major-only (miss patches); tag-by-digest-only in base (lose
-auto-refresh signal); fully automatic major bumps (breaking changes ship un-reviewed).
+**Decision.** `scripts/lib/devbox-contract.sh` declares the ordered service list, container names, Traefik hosts, install paths and backup scope, plus two accessors: `devbox_get` and `devbox_config_get`. `setup.sh` sources the repo copy and installs it to `~/docker/lib/`, and helpers source the installed copy. The file is bash-only (`DEVBOX_SERVICES` is an array) and stays declarative. `DEVBOX_CONTRACT_VERSION` is bumped on schema-incompatible changes, and `setup.sh --check` diffs the repo copy against the installed one.
 
-**Consequences.** New minor releases require operator action (intentional). Patch-pinned
-images (ollama, docker-socket-proxy) get no automatic refresh at all; bump them by hand.
-The operator inspects available majors manually via `docker manifest inspect <image>:<tag>` or upstream release notes.
+**Drivers.** Without one declaration site, setup installed services to one path while the helpers iterated another, and variable names disagreed between scripts. Every fresh install silently skipped every service.
 
-## Alpine Backup Image Refresh
+**Rejected.** YAML plus a parser: an extra dependency. Constants duplicated across scripts: the original source of drift. Environment variables only: no place where the values are declared.
 
-**Decision.** `scripts/lib/devbox-contract.sh` pins `ALPINE_BACKUP_IMAGE=alpine@sha256:...`
-for `backup.sh`'s named-volume export. `.github/workflows/monthly-rebuild.yml` includes
-an `alpine-digest-check` job that resolves the upstream `alpine:3.21` manifest, compares
-to the contract, and on drift opens a PR via `peter-evans/create-pull-request@v6` —
-never mutates `main` directly.
+**Consequences.**
+- `tests/contract/contract.bats` checks the contract against the Compose configuration as resolved by Compose: project names, container names, `Host()` rules, and that every backup exclusion names a real volume.
+- `security-check.sh`, `status.sh`, `backup.sh` and `diagnose.sh` iterate the contract, so a new service is covered as soon as it is declared.
+- Every path derives from `DEVBOX_HOME`, which helpers compute from their own location because `sudo` sets `HOME=/root`.
 
-**Drivers.** Backups must be reproducible; pinning by tag-only would silently change.
-Auto-PR keeps the operator in the loop without daily-busywork.
+## Compose chain in each service's `.env`
 
-**Rejected.** Auto-commit to main (no review); never refresh (digest goes stale, OS
-patches missed); pin in setup.sh instead of contract (forces re-render on every bump).
+**Decision.** `setup.sh` writes Compose's native `COMPOSE_FILE` into each service's `.env` as `docker-compose.yml[:docker-compose.https.yml][:docker-compose.gpu.yml]:docker-compose.lock.yml`. A top-level `name:` pins the project names `traefik` and `ollama-openwebui`.
 
-**Consequences.** First monthly run after a digest change opens a PR. Operator reviews
-the diff (single-line digest swap), runs the manual `docker manifest inspect` to
-confirm, merges. Workflow injection-safe: all manifest output flows through env vars
-to `run:` blocks; PR body comes from `body-path:` file, not inline `body:`.
+**Drivers.** When the chain lived in `config.env` and the helpers assembled `-f` flags, a plain `docker compose` in the service directory loaded only the base file, and the digest lock was ignored in the default HTTP mode. With native `COMPOSE_FILE`, helpers, operators and systemd all load the same chain.
 
-## Traefik Security Middleware
+**Rejected.** A chain in `config.env` read by wrappers, which plain `docker compose` bypasses. Separate file sets per mode: duplication.
 
-**Decision.** Security middleware (HSTS, frame-deny, CSP, rate-limit, IP allowlist
-constrained to Tailscale CGNAT IPv4 + IPv6 ULA + loopback) is wired at the entrypoint
-level in `traefik.yml`, not per-router. Files live in
-`services/traefik/dynamic/middlewares-*.yml`. The HTTPS-only HSTS middleware
-(`middlewares-https.yml`) is rendered only when `ENABLE_HTTPS=true`.
+**Consequences.**
+- The lock always applies, and `security-check.sh` fails any container whose image is not digest-pinned.
+- Pinned project names give stable volume names (`ollama-openwebui_ollama-data`, `ollama-openwebui_openwebui-data`) and the label that backups use to discover volumes.
+- `scripts/ci/check-compose-config.sh` validates every chain setup can emit.
 
-**Drivers.** Per-router middleware is repetitive and easy to forget on a new router.
-Entrypoint-level wiring catches every router behind the entrypoint by default.
+## Tailscale-only binding, failing closed
 
-**Rejected.** Per-router labels (forgettable); global middleware in `traefik.yml`
-without a file provider split (mixes static + dynamic concerns).
+**Decision.** Only Traefik publishes ports, and only on `${TAILSCALE_IP:?}`. Other services use `expose` on the shared `proxy-net` network. `TAILSCALE_IP` and `WEBUI_SECRET_KEY` use `${VAR:?}`, so an unset value aborts Compose instead of producing a wildcard bind or an empty secret. The sysctl `net.ipv4.ip_nonlocal_bind=1` lets Docker bind the Tailscale address at boot, before `tailscale0` exists. Hosts without Tailscale (CI) can opt into `DEVBOX_ALLOW_NO_TAILSCALE=true`, which binds to 127.0.0.1.
 
-**Consequences.** Adding a new service requires only `traefik.enable=true` + router
-labels; middleware is automatic. Disabling a middleware globally is one file edit.
+**Drivers.** Docker publishes ports through DNAT, which bypasses UFW's INPUT rules, so a firewall cannot protect a `0.0.0.0` bind. Binding to the Tailscale address is the control that holds. A `${VAR:-}` default turns a missing IP into a bind on all interfaces.
 
-## Per-File `x-logging` Anchor
+**Rejected.**
+- Binding `0.0.0.0` and filtering with UFW: bypassed by Docker.
+- DOCKER-USER or DNAT scoping modules: moving parts for topologies DevBox never creates.
+- Waiting for `tailscaled` at boot: races.
+- A separate internal network between Open WebUI and Ollama: both already share `proxy-net`, so it isolated nothing.
 
-**Decision.** Each `services/*/docker-compose.yml` includes its own 4-line `x-logging`
-anchor. CI (`scripts/ci/check-anchor-consistency.sh`) sha256s the anchor block and
-fails if any file diverges.
+**Consequences.**
+- Three independent checks guard the property: `check-compose-config.sh` (offline, every chain), `contract.bats` (only Traefik publishes, only on `TAILSCALE_IP`) and `security-check.sh` (the running containers).
+- Clients need the `.internal` names to resolve to the Tailscale IP.
+- If the Tailscale IP changes, re-run `setup.sh`.
 
-**Drivers.** YAML anchors are per-file; cross-file inclusion does not work
-(empirically tested). Per-file duplication with CI drift detection is the only
-spec-compliant approach.
+## HTTPS as an overlay with DNS-01
 
-**Rejected.** External logging library; YAML merge keys (broken across Compose
-versions); Compose extends: (deprecated for logging).
+**Decision.** HTTPS is opt-in (`ENABLE_HTTPS=true`). Overlay files add port 443 on the Tailscale IP, the OVH credentials (`env_file: ovh.env`, mode 0600), the named volume `letsencrypt` for ACME state (`traefik_letsencrypt`), and TLS routers for `ai.<domain>` and `ollama.<domain>`. Traefik creates and owns `acme.json` inside the volume. `setup.sh` renders `traefik.https.yml.template` over `traefik.yml` to add the `websecure` entrypoint and the Let's Encrypt resolver.
 
-**Consequences.** Logging config changes must land in one commit touching every
-compose file. CI keeps this honest.
+**Drivers.** Some clients require HTTPS with a publicly trusted certificate. The DNS-01 challenge issues one without any public listener. Traefik insists on an `acme.json` with mode 0600 owned by its own uid. With `cap_drop: ALL` it cannot open an operator-owned host file, so the state belongs in a volume Traefik owns.
 
-## Verified Downloads
+**Rejected.** HTTP-01, which needs a public port 80. Self-signed certificates or a private CA, which must be distributed to every client. Separate full compose files per mode: duplication. A host-side `letsencrypt/acme.json` created by setup: unreadable to Traefik.
 
-**Decision.** Every `curl ... | sh` style network install is routed through
-`scripts/lib/fetch-verify.sh` with the expected sha256 pinned in
-`scripts/lib/download-manifest.sh`. `DEVBOX_ALLOW_UNVERIFIED=1` is the named
-emergency override (loud warning).
+**Consequences.**
+- `backup.sh` archives the ACME volume like any other Compose volume.
+- On upgrade, a legacy `~/docker/traefik/letsencrypt/` is left untouched and certificates are re-issued.
+- Certificate names appear in Certificate Transparency logs. A DNS record `*.<domain>` pointing at the Tailscale IP is public, but only tailnet members can reach it.
+- OVH is the only DNS provider wired up. Supporting another means changing the template and the overlay's environment.
+- The `.internal` routers and the dashboard stay on HTTP.
 
-**Drivers.** Supply-chain attack surface. Without verification, the security boundary
-is "trust whatever happened to be at this URL today."
+## Traefik middlewares on the entrypoints
 
-**Rejected.** Distro packages only (some tools aren't packaged); checked-in binaries
-(license + size); GPG-only (most upstreams don't sign in a verifiable way).
+**Decision.** Every entrypoint applies two middlewares: `default-headers-base` (frame deny, nosniff, referrer policy, `X-Robots-Tag`) and `internal-only`, an allowlist of `100.64.0.0/10`, `fd7a:115c:a1e0::/48` and loopback. The `websecure` entrypoint adds HSTS. Definitions live in `services/traefik/dynamic/`.
 
-**Consequences.** Operators see explicit verification on every download. SHA bumps
-require commit + review. The `--unverified` override prints a loud banner so the
-operator cannot pretend it didn't happen.
+**Drivers.** Per-router labels get forgotten on new routers, while entrypoint wiring covers every router by default. The allowlist is defense in depth behind the Tailscale bind.
 
-## Release Tarball: Cosign Keyless + SLSA + SBOM
+**Rejected.**
+- Per-router middleware labels.
+- A rate-limit middleware: it throttled IDE clients and Open WebUI bursts, and every client is already on the tailnet.
+- `browserXssFilter`: deprecated, and ignored by current browsers.
 
-**Decision.** Monthly CI builds a deterministic `devbox.tar`, signs with cosign keyless
-(GitHub OIDC + Sigstore Rekor), generates a CycloneDX SBOM, attaches a SLSA Build L3
-provenance attestation, and publishes via `gh release create`. Operators install via
-the tarball after `cosign verify-blob` (with both `--certificate-identity` AND
-`--certificate-oidc-issuer`) and optional `slsa-verifier`.
+**Consequences.** A new service needs only `traefik.enable=true` and its router labels. Loopback stays in the allowlist for in-container health checks.
 
-**Drivers.** Production installs need an immutable, verifiable artifact. Cosign
-keyless removes the long-lived signing key footgun.
+## Credentials are state, auth middlewares are derived
 
-**Rejected.** Long-lived cosign key (key management burden); GPG-signed tarball
-(needs to verify the public key out-of-band); no signing (downgrade risk for any
-operator who skips verification).
+**Decision.** `setup.sh` generates `traefik-dashboard.txt` and `ollama-auth.txt` once in `~/docker/.secrets/` (directory 0700, files 0600). The Traefik basic-auth middlewares (`dynamic/*-auth.yml`) are rendered from them on every run, and also by `rotate-ollama-auth.sh` and `restore.sh`. Hashes are apr1 and are written verbatim. The middleware files have mode 0640, and Traefik reads them through the operator's group: `group_add: ${DEVBOX_GID:?}`, with `DEVBOX_GID` written to `traefik/.env` by setup. Open WebUI reaches Ollama directly at `http://ollama:11434`, so it never crosses the auth middleware. `WEBUI_SECRET_KEY` is rendered into `.env` once.
 
-**Consequences.** First monthly run after each main commit produces a signed bundle.
-`docs/updating.md` documents the verify sequence. The tarball bundles `services/`,
-`scripts/`, `setup.sh`, `docs/`, `README.md`, `LICENSE` — self-contained install.
+**Drivers.** When hashes were regenerated on every run, a re-run broke the credential operators had stored. Rotation used to write `$$`-escaped hashes, which Traefik's file provider reads literally, so rotation broke authentication. `$$` escaping applies only to Compose labels. Traefik runs as root with `cap_drop: ALL`, so it lacks `CAP_DAC_OVERRIDE` and cannot read operator-owned 0600 files.
 
-## Snapshot-Only Recovery (No Auto-Rollback)
+**Rejected.** Regenerating credentials on every run. Hashes in Compose labels. Adding back `CAP_DAC_OVERRIDE`, which restores root's ability to bypass file permissions. World-readable middleware files. A GPG-encrypted credentials file in `$HOME`: an extra install step that still desynced. Authentication between Open WebUI and Ollama: it would tie Open WebUI to every rotation without adding a boundary on a shared network.
 
-**Decision.** `setup.sh` snapshots `~/docker/` and `~/.config/devbox/` into
-`~/.local/share/devbox/backups/<timestamp>/` before any destructive operation (rsync,
-sudoers edit, template render). Recovery is operator-driven: pick a snapshot, copy
-back, restart. There is no auto-rollback.
+**Consequences.**
+- Rotations and re-runs never desynchronize.
+- `security-check.sh` expects 0640 on the middleware files and 0600 on the credentials.
+- apr1 is weak against offline cracking, which is acceptable for 32-character random passwords.
+- Backups include `.secrets/`, and a restore re-renders the middlewares.
+- When setup creates the operator account, it writes the sudo password to `user-password.txt`, and `security-check.sh` warns while that file exists.
 
-**Drivers.** Auto-rollback requires accurate failure detection. False positives cause
-worse incidents than the original failure. Snapshots + operator decision is more
-resilient.
+## Image pinning: tag plus digest lock
 
-**Rejected.** Git-managed runtime tree (mixes operator state with code state);
-automatic rollback on health-check fail (false positives during slow upstream pulls);
-no recovery story (hostile to operators).
+**Decision.** Base compose files pin tags. Images get a minor tag where upstream publishes one (`traefik:v3.7`, `open-webui:0.12`) and a patch tag otherwise (`ollama/ollama:0.40.10`, `tecnativa/docker-socket-proxy:v0.5.0`). A generated `docker-compose.lock.yml` per service pins `repo:tag@sha256:<index digest>`. `scripts/update-images.sh` produces it from the base file alone with `docker compose config --lock-image-digests`. PR CI never queries a registry: `contract.bats` checks offline that each lock pins exactly the base tags. A monthly job refreshes the locks through a pull request.
 
-**Consequences.** Operators must learn the snapshot directory layout. `docs/ops.md`
-documents the recovery procedure with concrete commands. `backup.sh` (separate from
-snapshots) exports named volumes via `docker run -v <vol>:/data alpine@sha256:... tar`.
+**Drivers.** Tags move and digests do not. Patch releases carry security fixes, so they should arrive without hand edits but still pass review. A PR gate that depends on registries fails for reasons unrelated to the change.
 
-## Systemd Integration (Single Stack Unit + Daily Backup Timer)
+**Rejected.**
+- Tags only: not reproducible.
+- Digests in the base files: the tag no longer signals what to refresh.
+- Hand-edited locks.
+- `update-images.sh --check` in PR CI: it fails whenever upstream ships a patch.
+- Chaining the old lock while regenerating: the old digest overrides the tag, so nothing ever refreshes.
 
-**Decision.** `make install-systemd` (or `${HOME}/docker/install-systemd.sh` directly)
-renders three units from templates under `${HOME}/docker/systemd/` and installs them
-into `/etc/systemd/system/`:
+**Consequences.**
+- Index digests resolve per platform, so the locks work on amd64 and arm64.
+- Patch-pinned images never move on their own.
+- A minor or major bump means editing the tag, running `scripts/update-images.sh --apply`, and committing.
 
-- `devbox.service` — `Type=oneshot`, `RemainAfterExit=yes`, `ExecStart=${DEVBOX_HOME}/start-all.sh`,
-  `ExecStop=${DEVBOX_HOME}/stop-all.sh`.
-- `devbox-backup.service` — `Type=oneshot`, `Requires=devbox.service`,
-  `Nice=10 IOSchedulingClass=idle`, runs `backup.sh`.
-- `devbox-backup.timer` — `OnCalendar=daily Persistent=true RandomizedDelaySec=1800`.
+## Host software: vendor apt repositories and mise, no `curl | sh`
 
-The installer enables `devbox.service` + `devbox-backup.timer` (NOT the backup
-service directly — timer-driven) but does NOT auto-start; operator decides.
+**Decision.**
+- **Tailscale and mise** come from their vendor apt repositories. Each signing key is downloaded, checked against the fingerprint pinned in `scripts/lib/pins.sh`, and exported into a keyring that holds only that key. The deb822 source references it with `Signed-By`.
+- **Developer tools** come from the mise system config (`scripts/install/mise-config.toml`, installed as `/etc/mise/config.toml`). Explicit `aqua:` backends make mise verify checksums, plus cosign, SLSA or GitHub attestations where the vendor publishes them. Exegol is installed with `pypi:`. Versions resolve to the latest at install time.
+- **Oh My Zsh** is pinned by commit, with auto-update disabled. The LazyVim starter is not pinned.
+- **`scripts/update-pins.sh`** checks that the vendor keys still carry the pinned fingerprints and bumps the Oh My Zsh commit.
+- **unattended-upgrades** is installed and enabled (`/etc/apt/apt.conf.d/20auto-upgrades`). `/etc/apt/apt.conf.d/52devbox-unattended-upgrades` adds the Tailscale and mise origins to the default Ubuntu pockets.
 
-**Drivers.** Per-container systemd units add no value over Compose's `restart: unless-stopped`.
-A single oneshot stack unit gives operators `systemctl start devbox` + boot-time
-automation without doubling the failure modes.
+**Drivers.** apt verifies every package, and unattended-upgrades patches the vendor repositories as well as Ubuntu's. mise verifies downloads and handles upgrades. The earlier per-tool SHA256 manifest held placeholder hashes, so a fresh install could not complete, and every upstream release would have broken it again.
 
-**Rejected.** Per-service systemd unit (couples to compose internals, double restart
-policy); systemd Compose plugin (Compose-managed bare-systemd path is enough); no
-systemd at all (operators want boot-time start + scheduled backup).
+**Rejected.** A SHA256 manifest with a fetch-and-verify wrapper and an "unverified" bypass. Pinning tool versions in the repo: churn, with no trust gain over mise's verification. Pinning the LazyVim starter: lazy.nvim fetches its plugins unpinned anyway, so pinning the template alone adds nothing.
 
-**Consequences.** Bats `tests/contract/systemd.bats` exercises `systemd-analyze verify`
-against each rendered template + asserts they reference the contract's `DEVBOX_HOME`
-and `DEVBOX_USER`.
+**Consequences.**
+- Toolchain versions differ between installs made at different times. `mise upgrade` updates them.
+- A vendor key rotation fails setup and the monthly job until someone verifies the new key out of band and edits `pins.sh`. Fingerprints never change automatically.
+- `mise install` can hit GitHub API rate limits. `MISE_GITHUB_TOKEN` avoids them.
 
-## Ollama Basic Auth (Per-Install Credential + Rotation)
+## Logging through Docker daemon defaults
 
-**Decision.** `setup.sh` generates a per-install 32-char password for the
-`ollama-auth@file` middleware. The htpasswd hash lives in
-`${DEVBOX_HOME}/traefik/dynamic/ollama-auth.yml` (mode 0600); the plaintext lives in
-`${DEVBOX_HOME}/.secrets/ollama-auth.txt` (mode 0600). External clients of
-`http://ollama.internal` (Tailscale-only) authenticate with this credential.
+**Decision.** `setup.sh` sets `json-file` rotation (10 MB × 3) in `/etc/docker/daemon.json` when no `log-driver` is configured. Compose files carry no logging blocks. Traefik writes its logs and access log to stdout.
 
-Open WebUI talks to Ollama on the internal Compose network
-(`http://ollama:11434`, no auth) and is unaffected by rotation.
-`scripts/host/rotate-ollama-auth.sh` regenerates both files and runtime-checks
-Open WebUI's `OLLAMA_BASE_URL` to catch misconfigurations.
+**Drivers.** Per-file `x-logging` anchors had to stay byte-identical and needed their own CI check. Daemon defaults also cover Exegol and any other container on the host.
 
-**Drivers.** Want unauthenticated internal access (Open WebUI just works) but
-authenticated external access (any Tailscale client needs the credential).
+**Rejected.** Per-file anchors with a consistency check. Traefik log files under the install tree, outside Docker's log rotation.
 
-**Rejected.** Shared static credential (operational risk on disclosure); no auth on
-the external route (Tailscale alone is the boundary, but auth-in-depth is cheap);
-auth at the Compose-network level (would break Open WebUI).
+**Consequences.** A log driver chosen by the operator is respected. Docker is restarted once, on the run that changes `daemon.json`.
 
-**Consequences.** Operator retrieves the credential from
-`${DEVBOX_HOME}/.secrets/ollama-auth.txt`. Rotation requires no Open WebUI changes
-unless the operator manually pointed `OLLAMA_BASE_URL` at the external host (the
-rotation script warns when it sees this).
+## Backup and restore
 
-## CI: pr-validate + monthly-rebuild
+**Decision.**
+- **Volumes:** `backup.sh` finds each service's volumes by the `com.docker.compose.project` label, skips `DEVBOX_BACKUP_EXCLUDE_VOLUMES`, pauses the containers that use a volume while archiving it, and runs `tar` inside an image the stack already uses.
+- **Files:** it adds `DEVBOX_BACKUP_PATHS` and each service's `.env`.
+- **Output:** one archive with a `MANIFEST`, encrypted with age (preferred) or GPG when configured.
+- **Restore:** `restore.sh` validates the archive before stopping anything, restores data but keeps the current host's setup-managed keys (`config.env` and the service `.env` chain keys), skips volumes the current stack does not use, tolerates root-owned Exegol files, and re-renders the auth middlewares.
 
-**Decision.** `.github/workflows/pr-validate.yml` runs on every PR: lint
-(shellcheck + bash -n + 55 unit bats), compose-config validate (HTTP + HTTPS),
-anchor consistency, docs↔tree consistency, digest lockfile freshness. Docker Hub login
-is conditional (`if: env.DOCKERHUB_USERNAME != ''`) so forks don't fail.
+**Drivers.** The previous script used unprefixed volume names and silently archived nothing. Pausing captures SQLite in a consistent state. Reusing an image the stack already trusts avoids pinning and refreshing a separate backup image.
 
-`.github/workflows/monthly-rebuild.yml` runs on the 1st of each month at 06:00 UTC (or via
-`workflow_dispatch`): same lint + compose-config + anchor + smoke test + lockfile
-refresh + deterministic tarball + cosign signing + SBOM + SLSA + GitHub release. A
-separate `alpine-digest-check` job opens an auto-PR on alpine digest drift.
+**Rejected.** Hard-coded volume names. A pinned Alpine backup image. Backing up Ollama models, which are large and can be re-pulled; the `ollama list` output is saved instead. Generic per-application backup modules.
 
-**Drivers.** Catch drift early; produce a verifiable monthly artifact; let forks
-contribute without secret setup.
+**Consequences.**
+- Volumes of a new service, and the ACME volume, are backed up automatically.
+- Open WebUI pauses briefly during a backup.
+- Unencrypted archives contain credentials: they get mode 0600 and a warning.
+- Restoring onto a new host needs only `setup.sh` before the restore. Host-specific values are kept, so Traefik binds the new host's Tailscale IP.
 
-**Rejected.** Single monolithic workflow (hard to retry one step); no fork support
-(community-hostile); no auto-PR for alpine (digest goes stale silently).
+## systemd: one stack unit and a backup timer
 
-**Consequences.** Every PR runs the full contract test suite (35 contract bats + 55
-unit bats). Monthly tag is the reproducible install path. Alpine refresh PRs require
-operator merge.
+**Decision.** Three units:
 
-## Contract Bats Test Suite
+- `devbox.service`: oneshot with `RemainAfterExit`. Runs `start-all.sh` and `stop-all.sh` as the operator. `Requires=docker.service` and starts after `tailscaled` and `network-online`.
+- `devbox-backup.service`: a oneshot that runs at idle I/O priority.
+- `devbox-backup.timer`: daily, `Persistent`, with a 30-minute random delay.
 
-**Decision.** `tests/contract/contract.bats` (24 tests) + `tests/contract/systemd.bats`
-(11 tests) form the install-contract regression suite. Tests run against the repo
-files, not a live install — they don't require docker except for two explicit
-network-gated assertions (`docker manifest inspect ollama/ollama:0.33.3` and
-`update-images.sh --check`).
+`install-systemd.sh` renders the templates, verifies them, and enables the units without starting them. It resolves the install from its own location.
 
-Coverage: contract structure, helper-read vars ⊆ setup-emitted keys, every
-documented `Host(*.internal)` has a router, named volumes ⊆ backup targets,
-container names ⊆ security-check references, ollama auth wiring, HTTPS overlay
-shape, install-marker shape, dry-install fixture equality, systemd rendering +
-analyze-verify, lockfile sync.
+**Drivers.** `restart: unless-stopped` already handles crashes. A single unit adds boot ordering and `systemctl` control.
 
-**Drivers.** v3 shipped with 55 unit bats but zero install-contract tests. Drift
-caught only by operator first-install pain. Adding contract tests at PR-validate
-gate prevents the same class of regression from re-entering.
+**Rejected.**
+- Per-container units: a second restart policy.
+- The backup unit requiring the stack unit: a backup would start a stack the operator stopped on purpose.
+- Resolving the install from `$HOME`: that is `/root` under `sudo`.
 
-**Rejected.** Live-install integration tests (slow, brittle, require root); unit
-tests only (don't catch drift); manual review (proven insufficient).
+**Consequences.** `tests/contract/systemd.bats` renders the templates and runs `systemd-analyze verify` on them.
 
-**Consequences.** Every PR runs the 35 contract tests. Schema changes require test
-updates (contract v2 bump updated test 7 for the printf-based emission + dynamic
-key naming).
+## Testing: offline static checks plus a real install
 
-## Skipped / Deferred
+**Decision.** There are two layers:
 
-- **AnythingLLM, Nextcloud** — initially scoped, dropped from v1.0.0 to keep the
-  base contract small. Either can be added later via a new `services/<svc>/` + a
-  contract entry + a Bats test. No design constraint blocks reintroduction.
-- **--dry-run integration with a live diff against an existing install** — current
-  `--dry-run` prints planned actions but does not diff binary-level. Adequate for
-  P0; richer diffing deferred.
-- **`DEVBOX_USER` migration semantics** — when contract version bumps from 2 to 3,
-  `setup.sh --check` will need to detect old config.env shape and emit a clear
-  migration message. Deferred until a real schema change lands.
+1. **Static and offline** (CI job `static`, `make test`): `scripts/ci/lint.sh`, `scripts/ci/check-docs-tree.sh`, `bats tests/unit tests/contract`, and `scripts/ci/check-compose-config.sh`.
+2. **Real install** (CI job `e2e`): `scripts/ci/e2e.sh` installs DevBox on a disposable runner and exercises it. Locally the same script runs inside a privileged systemd container (`scripts/ci/e2e-container.sh`).
 
-## References
+`scripts/ci/local.sh` mirrors the workflow step for step, and `.githooks/pre-push` runs it.
 
-- `scripts/lib/devbox-contract.sh` — canonical contract.
-- `tests/contract/` — assertions that pin the contract shape.
-- `docs/security.md` — trust model + threat boundaries.
-- `docs/ops.md` — incident response + backup/restore procedures.
-- `docs/updating.md` — image digest refresh + signed-tarball install + alpine refresh.
-- `services/README.md` — Compose layout, rendering table, anchor pattern.
-- `README.md` — quick start + architecture diagram.
+**Drivers.** Desynced credentials, an ignored digest lock, empty backups and broken rotation all passed static tests. Only a real install catches regressions in sshd, UFW, routing and authentication.
+
+**Rejected.** Static tests only. Running e2e on the developer's machine, which reconfigures users, sshd and UFW. Mocking Docker.
+
+**Consequences.**
+- The e2e needs root, a Docker daemon, network access and about 15 GB of disk.
+- `CI_FAST=1 git push` skips it locally; CI always runs it.
+- `contract.bats` needs the Docker CLI, and `systemd.bats` needs `systemd-analyze`.
+
+## Monthly refresh and signed releases
+
+**Decision.** `.github/workflows/monthly-rebuild.yml` has two jobs:
+
+- **`refresh`:** runs `update-images.sh --apply` and `update-pins.sh --apply`, smoke-tests the result with `scripts/ci/smoke-test.sh`, and opens one pull request on `chore/monthly-refresh`. It never pushes to `main`.
+- **`release`:** runs only when `main` moved since the last `monthly-*` tag and `pr-validate` (including e2e) passed on that commit. It smoke-tests, builds a deterministic `devbox.tar` with its SHA256, signs it with cosign keyless into a Sigstore bundle, and publishes a GitHub release with notes from `scripts/ci/release-notes.sh`.
+
+All actions are pinned by commit SHA.
+
+**Drivers.** Patches arrive on a schedule but still pass review. Keyless signing leaves no long-lived key to protect, and it ties the signature to this workflow on `main`.
+
+**Rejected.**
+- Auto-merging or pushing to `main`.
+- A long-lived signing key, or GPG.
+- SLSA provenance: it was non-blocking and used the wrong subject format.
+- A CycloneDX SBOM: it scanned the repository, not the images.
+
+**Consequences.**
+- Pull requests opened with `GITHUB_TOKEN` do not trigger `pr-validate`: close and reopen them to run the checks.
+- Verification must pin both `--certificate-identity` and `--certificate-oidc-issuer`.
+- A Sigstore outage means no release that month. Installing from a clone still works.
+
+## Not included
+
+- **Optional hardening modules** (DNAT scoping, extra fail2ban jails, generic backup skeletons): they targeted topologies DevBox never creates.
+- **Laptop editor configs** that pointed at port 11434: Ollama never publishes that port, so clients go through `http://ollama.internal` with basic auth (`scripts/laptop/ollama-setup.sh`).
+- **More applications** (for example AnythingLLM or Nextcloud): nothing prevents adding them as new services with contract entries. See [services/README.md](services/README.md).

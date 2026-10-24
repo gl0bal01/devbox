@@ -1,450 +1,101 @@
-# Updating Images and Verifying Signatures
+# Updating
 
-This guide explains how to refresh image digests, verify cosign signatures, and understand the three installation modes.
+How to update an installed host, how the version pins work, and how to install from a signed release.
 
-## Install from a signed release tarball
-
-The recommended production install path is the signed monthly release tarball, not a `git clone`. Every tarball is:
-
-- **Signed** with cosign keyless (GitHub OIDC, Sigstore Rekor transparency log)
-- **Digest-attested** with a `sha256sum`-verifiable `.sha256` file
-- **SLSA provenance** attached as an in-toto attestation (SLSA Build L3)
-- **SBOM** generated from the locked image set (CycloneDX JSON)
-- **Immutable** per monthly tag — the tarball content is frozen at build time
-
-The git-clone path (`git clone ... && ./setup.sh`) is fine for development and contribution. For any persistent or production deployment, prefer the tarball so you get the full verification chain.
-
-### Download the latest monthly release
+## Update an installed host
 
 ```bash
-# Resolve the latest monthly-* tag
-TAG="$(gh release list --repo gl0bal01/devbox --json tagName,createdAt \
-      --jq 'sort_by(.createdAt) | last | .tagName')"
-
-# Download tarball + all attestation files
-gh release download "$TAG" --repo gl0bal01/devbox \
-  -p 'devbox.tar' -p 'devbox.tar.sha256' -p 'devbox.tar.sig' \
-  -p 'devbox.tar.pem' -p 'sbom.cdx.json' -p 'devbox.tar.intoto.jsonl'
+cd ~/devbox                  # your checkout
+git pull
+./setup.sh --dry-run         # optional: preflight + which files under ~/docker would change
+sudo ./setup.sh --yes
+~/docker/start-all.sh        # setup.sh doesn't run compose; this applies the changes
 ```
 
-### Verify before extracting
+- setup.sh is idempotent, and re-running it is also the fix path when something is wrong.
+- You don't need to pass your choices again. The operator account is recorded in the root-owned `/etc/devbox/operator`. Installs older than that file have to pass `DEVBOX_USER` once, unless the user is `dev`. Everything else (SSH port, HTTPS, domain, email, GPU) is remembered in `~/.config/devbox/config.env`. An environment variable overrides the stored value, for example `sudo DEVBOX_GPU=nvidia ./setup.sh`. Keys you add to `config.env` yourself are kept.
+- It keeps generated secrets, your `.env` edits, the SSH port (also on installs from before `config.env` recorded it) and the ACME state. Everything else under `~/docker/` is replaced from the repo (see [ops.md](ops.md#working-with-the-installed-stack)).
+- `--no-upgrade` skips `apt-get upgrade`; required packages are still installed. `--no-dev-tools` skips the mise toolchain, Oh My Zsh, LazyVim and `.zshrc`.
+- `./setup.sh --check` (no root needed) reports whether the installed runtime contract differs from the repo's copy. `make doctor` runs that check and then `status.sh`.
 
-**Step 1 — SHA256 integrity check:**
+**Changing the SSH port** (`sudo DEVBOX_SSH_PORT=2222 ./setup.sh`): allow the new port in your provider's firewall first. setup.sh confirms sshd is listening on the new port before it replaces the old UFW rule.
+
+## Container images
+
+Each image is pinned twice:
+
+1. A tag in `services/<service>/docker-compose.yml`. Traefik and Open WebUI use minor tags (`traefik:v3.7`, `open-webui:0.12`), so patch releases arrive through digest refreshes. Ollama and docker-socket-proxy publish no minor tags, so they are pinned to a patch release (`ollama/ollama:0.40.10`, `docker-socket-proxy:v0.5.0`) and only move when you bump them by hand.
+2. A digest lock in `docker-compose.lock.yml`, of the form `repo:tag@sha256:<digest>`. The digest is the multi-arch index, so the same lock works on amd64 and arm64. The lock is always last in `COMPOSE_FILE`, so the stack runs exactly the locked images.
+
+Don't edit lock files by hand. `scripts/update-images.sh` regenerates them from the tags:
 
 ```bash
+scripts/update-images.sh --check     # exit 1 if any lock is behind its tag
+scripts/update-images.sh --apply     # rewrite the locks
+```
+
+Both modes query the registries, so PR CI doesn't run them. Instead, `tests/contract/contract.bats` checks offline that each lock pins exactly the tag in the base file.
+
+**Bumping a tag** (new minor or major, or a new Ollama or docker-socket-proxy patch release):
+
+```bash
+$EDITOR services/ollama-openwebui/docker-compose.yml   # change the image tag
+scripts/update-images.sh --apply
+bats tests/contract                                    # lock matches tag
+make e2e                                               # full install + checks in a throwaway container
+git commit -am "chore: bump ollama to <version>"
+```
+
+Read the upstream release notes before a major bump. Then update the host as described above.
+
+### Rolling back
+
+Check out the previous commit or release, then run `sudo ./setup.sh` and `~/docker/start-all.sh`. The rollback doesn't touch volumes. A newer Open WebUI may have migrated its database in a way the older version can't read. If it fails to start after a rollback, restore a backup taken before the upgrade ([ops.md](ops.md#restore)).
+
+## Monthly automation
+
+`.github/workflows/monthly-rebuild.yml` runs on the 1st of each month and can also be started by hand. It has two jobs:
+
+- **refresh** runs `update-images.sh --apply` and `update-pins.sh --apply`, then smoke-tests the result with `scripts/ci/smoke-test.sh`. It opens a single PR on branch `chore/monthly-refresh` and never pushes to `main`. GitHub doesn't run `pr-validate` on PRs opened with `GITHUB_TOKEN`, so close and reopen the PR (or push to it) to run the full checks before merging.
+- **release** builds a signed tarball from `main` and publishes it as release `monthly-YYYYMMDD`, after the same smoke test. It skips the run if `main` hasn't moved since the last `monthly-*` tag.
+
+## Dev tools and host packages
+
+| What | How to update |
+|---|---|
+| mise toolchain (node, bun, rust, uv, neovim, lazygit, lazydocker, zellij, Exegol CLI) | `mise upgrade`, run as the operator. Defaults live in `/etc/mise/config.toml`; `~/.config/mise/config.toml` overrides them. |
+| AI coding CLIs | `~/docker/install-ai-dev-stack.sh --update` (`--status` lists what's installed) |
+| Exegol images | `exegol update` |
+| Ubuntu packages, Tailscale, mise | Automatic. setup.sh enables unattended-upgrades (`/etc/apt/apt.conf.d/20auto-upgrades`) and adds the Tailscale and mise repositories to its origins (`/etc/apt/apt.conf.d/52devbox-unattended-upgrades`). Re-running setup.sh also runs `apt-get upgrade`. |
+
+## Trust anchors
+
+`scripts/lib/pins.sh` holds the Tailscale and mise apt signing-key fingerprints and the Oh My Zsh commit. `scripts/update-pins.sh` checks or refreshes them:
+
+```bash
+scripts/update-pins.sh --check    # exit 1 on a key mismatch or a newer Oh My Zsh commit
+scripts/update-pins.sh --apply    # move the Oh My Zsh pin to upstream HEAD
+```
+
+The script never changes key fingerprints. If a vendor rotates its key, the monthly refresh job fails, and setup.sh refuses the new key on hosts where that tool is not yet installed. Verify the new fingerprint out of band (the vendor's documentation or announcement), edit `pins.sh`, and commit.
+
+## Install from a signed release
+
+Each monthly release has three assets:
+
+- `devbox.tar`: a deterministic tarball containing `services/`, `scripts/`, `setup.sh`, `ARCHITECTURE.md`, `README.md`, `LICENSE` and `docs/`
+- `devbox.tar.sha256`: its checksum
+- `devbox.tar.sigstore.json`: a cosign keyless signature bundle, issued to the release workflow
+
+```bash
+gh release download monthly-YYYYMMDD -R gl0bal01/devbox -p 'devbox.tar*'   # omit the tag for the latest release
 sha256sum -c devbox.tar.sha256
-# Expected output: devbox.tar: OK
-```
-
-**Step 2 — cosign keyless signature verification:**
-
-```bash
-# Install cosign if needed: https://docs.sigstore.dev/system_config/installation/
-cosign verify-blob devbox.tar \
-  --signature devbox.tar.sig \
-  --certificate devbox.tar.pem \
+cosign verify-blob devbox.tar --bundle devbox.tar.sigstore.json \
   --certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/monthly-rebuild.yml@refs/heads/main' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
-# Expected output: Verified OK
+mkdir devbox && tar -xf devbox.tar -C devbox && cd devbox && sudo ./setup.sh
 ```
 
-Both `--certificate-identity` and `--certificate-oidc-issuer` are required — omitting either would accept any GitHub Actions workflow as a valid signer.
+Keep both `--certificate-identity` and `--certificate-oidc-issuer`. Without them, cosign accepts a signature from any GitHub Actions workflow. Use a current cosign release to read the bundle.
 
-> **Legacy `weekly-*` releases** (cut before the switch to a monthly cadence) were signed by the old workflow file. To verify one, use `--certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/weekly-rebuild.yml@refs/heads/main'` instead. Their signatures remain valid; only the identity string differs.
-
-**Step 3 — SLSA provenance verification (optional, recommended for compliance):**
-
-```bash
-# Install slsa-verifier: https://github.com/slsa-framework/slsa-verifier
-slsa-verifier verify-artifact devbox.tar \
-  --provenance-path devbox.tar.intoto.jsonl \
-  --source-uri github.com/gl0bal01/devbox \
-  --source-tag "$TAG"
-# Expected output: PASSED: SLSA verification passed
-```
-
-### Extract and run
-
-```bash
-mkdir "devbox-${TAG}"
-tar -xf devbox.tar -C "devbox-${TAG}"
-cd "devbox-${TAG}"
-
-# Review what setup.sh will do (no root required for dry-run):
-./setup.sh --dry-run
-
-# Install:
-sudo ./setup.sh
-```
-
-The tarball bundles `services/`, `scripts/`, `setup.sh`, `README.md`, `LICENSE`, and `docs/` — everything needed for a self-contained install with no network access to the repo.
-
----
-
-## Image Digest Refresh
-
-Devbox uses minor-pinned tags (e.g., `traefik:v3.7`) with SHA digest locking for reproducibility. The `update-images.sh` script refreshes digests within the pinned minor version.
-
-### Check for Updates (Dry-Run)
-
-```bash
-cd ~/docker/devbox  # Or wherever you cloned the repo
-
-# Check if any digests have changed
-./scripts/update-images.sh --check
-echo "Exit code: $?"
-```
-
-Exit code 0 means the committed lockfiles match the latest resolved digests. Exit code 1 means updates are available.
-
-### Review Proposed Changes
-
-```bash
-# See exactly what would change
-git diff HEAD -- services/*/docker-compose.lock.yml
-
-# Or, after running --check, see the new lockfile:
-cat /tmp/update-check-output.lock.yml | diff -u services/traefik/docker-compose.lock.yml - | head -50
-```
-
-### Apply Updates
-
-```bash
-# Refresh all image digests within pinned minors
-./scripts/update-images.sh --apply
-
-# Review the changes
-git diff services/
-
-# If satisfied, commit
-git add services/
-git commit -m "Refresh image digests ($(date +%Y-%m-%d))"
-
-# If something looks wrong, revert
-git checkout HEAD -- services/
-```
-
-## Major Version Bumps
-
-Minor-pinned tags (e.g., `traefik:v3.7`) pull the latest patch within the minor. Major version bumps (`v3 → v4`) are manual edits.
-
-### Bump a Major Version
-
-1. **Edit the base compose file:**
-   ```bash
-   # Edit services/traefik/docker-compose.yml
-   # Change: image: traefik:v3.7
-   # To:     image: traefik:v4.1
-   ```
-
-2. **Refresh digests to resolve the new version:**
-   ```bash
-   ./scripts/update-images.sh --apply
-   ```
-
-3. **Test the new version locally (if possible):**
-   ```bash
-   docker compose -f services/traefik/docker-compose.yml \
-                  -f services/traefik/docker-compose.lock.yml config | grep "image: traefik"
-   
-   # Or spin up a test environment:
-   docker compose up --no-start  # Create containers without starting
-   docker compose up traefik      # Start one service to test
-   docker compose logs traefik    # Watch for errors
-   docker compose down            # Cleanup
-   ```
-
-4. **Commit the changes:**
-   ```bash
-   git add services/
-   git commit -m "Bump traefik to v4.1 (breaking changes noted in v4.0 changelog)"
-   ```
-
-## Installation Modes
-
-Devbox supports three installation modes, with increasing trust requirements and reproducibility.
-
-### Mode 1: `latest` (Development Only)
-
-Install from the latest commit on the main branch:
-
-```bash
-git clone https://github.com/gl0bal01/devbox.git
-cd devbox
-./setup.sh
-```
-
-**What you get:**
-- Pulls the latest code from main
-- Uses whatever image digests are currently committed
-- No signature verification
-- No smoke test
-- **NOT RECOMMENDED for production**
-
-**When to use:**
-- Development and testing
-- Contributing to devbox itself
-- Rapid iteration
-
-**Risk:**
-- Digests may not have been smoke-tested before merge
-- No provenance information
-- Bleeding-edge (possible regressions)
-
-### Mode 2: `monthly-YYYYMMDD` (Recommended for Production)
-
-Install from a tagged monthly release:
-
-```bash
-# List available monthly releases
-git tag | grep monthly- | sort
-
-# Checkout a specific monthly tag (e.g., monthly-20260413)
-git checkout monthly-20260413
-./setup.sh
-```
-
-**What you get:**
-- Digests have been:
-  - Resolved from minor-pinned tags by CI
-  - Smoke-tested (all services start and pass health checks)
-  - Signed with cosign keyless (GitHub OIDC identity)
-  - Attested with SBOM (dependencies list)
-  - Attested with SLSA provenance (build environment)
-- Git tag exists (immutable reference)
-- cosign signature in the GitHub release
-
-**When to use:**
-- **Production deployments** (recommended)
-- Persistent installs
-- Any case where reproducibility matters
-
-**Risk:**
-- Up to one month behind latest (by design, allows time for issues to surface)
-- If the monthly release is bad, rollback to the prior month's tag
-
-### Mode 3: `@sha256:<digest>` (Most Paranoid)
-
-Pin the release artifact by SHA256:
-
-```bash
-# Pin the digest manually (from a release you've previously verified)
-DEVBOX_SHA256="abc123def456..."
-TAG="monthly-20260516"
-
-gh release download "$TAG" --repo gl0bal01/devbox -p 'devbox.tar' -p 'devbox.tar.sha256'
-
-# Cross-check against your pinned digest
-echo "$DEVBOX_SHA256  devbox.tar" | sha256sum -c
-
-# Or: trust only the release-shipped .sha256
-sha256sum -c devbox.tar.sha256
-
-# Extract and install
-mkdir devbox-${TAG} && tar -xf devbox.tar -C devbox-${TAG}
-cd devbox-${TAG}
-sudo ./setup.sh
-```
-
-**What you get:**
-- Exact artifact verification by cryptographic hash
-- Same guarantees as Mode 2 (monthly tag)
-- Immutable reference (SHA is the artifact's permanent identity)
-
-**When to use:**
-- Maximum reproducibility
-- Compliance requirements (e.g., financial, healthcare)
-- Offline verification (compare SHA manually)
-
-**Risk:**
-- Requires manually tracking SHAs (harder to automate updates)
-- Still depends on GitHub release integrity
-
-## Understanding the Cosign Identity Fields
-
-The verification command shown earlier (in [Install from a signed release tarball](#install-from-a-signed-release-tarball)) requires two explicit flags:
-
-- **`--certificate-identity`** — the exact GitHub Actions workflow that signed this release.
-  - Format: `https://github.com/ORG/REPO/.github/workflows/WORKFLOW.yml@refs/heads/BRANCH`
-  - Pins the signature to *this specific workflow* — a compromised different workflow cannot satisfy it.
-
-- **`--certificate-oidc-issuer`** — the OIDC issuer that issued the signing certificate.
-  - Always `https://token.actions.githubusercontent.com` for GitHub Actions keyless flows.
-  - Proves the signer held a valid GitHub Actions OIDC token at signature time.
-
-Omitting either flag makes the verification effectively useless — any keyless cosign signature from any GitHub Actions workflow would match.
-
-### Optional — Rekor transparency log lookup
-
-```bash
-# Search Rekor for entries signed by the monthly-rebuild workflow
-rekor-cli search --rekor_server https://rekor.sigstore.dev \
-  --artifact devbox.tar
-```
-
-The Rekor entry is append-only and tamper-evident; a signature you've verified once can be re-verified offline at any time using the same cert + signature files shipped in the release.
-
-## Multi-Architecture (arm64) Caveat
-
-Image digest lockfiles target the CI runner architecture (**x86_64**). If you're deploying on arm64:
-
-### First-Time Setup on arm64
-
-```bash
-# Clone and checkout the desired release
-git clone https://github.com/gl0bal01/devbox.git
-cd devbox
-git checkout monthly-20260413
-
-# The existing lockfiles are x86_64; regenerate for your architecture
-./scripts/update-images.sh --apply
-
-# This pulls images and resolves digests for your local arm64 architecture
-# The lockfiles now contain arm64 digests
-
-# Commit or store locally (don't push unless you want to bump the release)
-# git add services/ && git commit -m "arm64 digests"  # Optional
-
-# Now install
-./setup.sh
-```
-
-### Subsequent Installs on arm64
-
-The lockfiles are now arm64-specific. Monthly updates will continue to refresh arm64 digests:
-
-```bash
-git pull  # Get the latest x86_64 lockfiles from main
-git checkout monthly-YYYYMMDD  # Check out the monthly tag (x86_64)
-
-# Regenerate for arm64
-./scripts/update-images.sh --apply
-
-# Install
-./setup.sh
-```
-
-**Why this is necessary:**
-- Docker image manifest lists contain platform-specific digests (x86_64, arm64, etc.)
-- `docker compose config --lock-image-digests` resolves to the current platform's digest
-- arm64 digests differ from x86_64 digests (different binaries, different dependencies)
-- CI runs on x86_64; the committed lockfiles therefore contain x86_64 digests
-
-## Emergency: Sigstore Unavailability
-
-If Sigstore Rekor is unavailable (rare), new signatures cannot be generated, but existing releases remain valid:
-
-```bash
-# If you're in the middle of an install and Sigstore is down:
-# Option 1: Wait for Sigstore to recover (a few hours at most)
-# Option 2: Use the fallback path (not recommended, see below)
-
-# Fallback (untrusted):
-DEVBOX_SKIP_SIGNATURE_VERIFY=1 ./setup.sh
-# WARNING: This deploys code WITHOUT signature verification. 
-# Re-verify after Sigstore recovers and Rekor entry is available.
-```
-
-**Important:**
-- Existing `monthly-YYYYMMDD` releases remain valid (their signatures were created at build time)
-- Only *new* releases would be blocked
-- Use this override only in emergencies
-- After Sigstore recovers, manually verify the cosign signature before deploying
-
-## Troubleshooting
-
-### `update-images.sh --check` exits 1
-
-**Cause:** Image digests have changed (new patches available within the pinned minor).
-
-**Action:** Run `--apply`, review the diff, and commit if desired.
-
-### SHA mismatch on fetch_and_verify
-
-**Cause:** A development tool (bun, rustup, etc.) released a new version; the pinned SHA no longer matches.
-
-**Action:**
-```bash
-# Option 1: Update the manifest (preferred)
-./scripts/update-manifest.sh --apply
-git add scripts/lib/download-manifest.sh
-git commit -m "Update download manifest"
-./setup.sh
-
-# Option 2: Emergency override (not recommended)
-DEVBOX_ALLOW_UNVERIFIED=1 ./setup.sh
-# Then update the manifest before the next install
-```
-
-### Traefik fails to start after digest update
-
-**Cause:** The newly resolved Traefik digest is broken upstream (rare).
-
-**Action:**
-```bash
-# Revert the digest update
-git revert HEAD
-
-# Redeploy from the prior commit
-./start-all.sh
-
-# Investigate what went wrong
-docker logs traefik
-
-# File an issue on the Traefik project if it's a known bug
-```
-
-## Alpine backup image refresh
-
-`scripts/host/backup.sh` exports named Docker volumes via a pinned alpine image declared in `scripts/lib/devbox-contract.sh` as `ALPINE_BACKUP_IMAGE` (sha256 digest form). Treating this as a contract value keeps backup output reproducible across operator workstations.
-
-### Auto-PR mechanism
-
-`.github/workflows/monthly-rebuild.yml` includes an `alpine-digest-check` job that runs on the same monthly schedule. The job:
-
-1. Resolves the current `alpine:3.21` multi-arch manifest digest via `docker manifest inspect`.
-2. Reads the digest currently pinned in `scripts/lib/devbox-contract.sh`.
-3. If they match, exits cleanly with no side effect.
-4. If they differ, bumps the digest in `devbox-contract.sh` and opens a pull request on a fresh `chore/alpine-digest-refresh-<run-id>` branch.
-
-The workflow **never** commits to `main` directly. Operators review the PR diff and merge (or close) on their own cadence.
-
-### Operator review checklist
-
-When the PR opens:
-
-- Confirm `scripts/lib/devbox-contract.sh` is the only file changed.
-- Run `docker manifest inspect alpine@sha256:<new-digest>` locally to confirm the digest resolves on docker.io/library/alpine.
-- Make sure no other `ALPINE` references slipped in (the bump is a pure digest swap).
-- Merge to ship the new image; close the PR to defer until the next monthly check.
-
-### Manual refresh fallback
-
-If you need to refresh outside the monthly schedule:
-
-```bash
-# Resolve the current upstream digest
-NEW_DIGEST="$(docker manifest inspect alpine:3.21 \
-    | jq -r '.manifests[0].digest // .config.digest // empty')"
-echo "${NEW_DIGEST}"
-# sha256:<64-hex>
-
-# Replace the digest in the contract
-sed -i -E "s|alpine@sha256:[a-f0-9]{64}|alpine@${NEW_DIGEST}|g" \
-    scripts/lib/devbox-contract.sh
-
-# Verify the contract still passes Bats
-bats tests/contract/contract.bats
-
-# Commit
-git add scripts/lib/devbox-contract.sh
-git commit -m "chore(contract): refresh ALPINE_BACKUP_IMAGE digest"
-```
-
-## References
-
-- **ARCHITECTURE.md:** Digest pinning strategy
-- **ARCHITECTURE.md:** Tag pinning and version bumps
-- **ARCHITECTURE.md:** Cosign keyless verification
-- **docs/security.md:** Trust model and threat boundaries
-- **docs/ops.md:** Backup and incident response
+To update a release install, download and verify the newer release, extract it into a fresh directory, and run `sudo ./setup.sh` and `~/docker/start-all.sh` from there. Your settings live in `~/.config/devbox/`, not in the extracted tree.

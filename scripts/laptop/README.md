@@ -1,66 +1,49 @@
-# Laptop Configuration Scripts
+# Laptop helpers
 
-Scripts to configure your local laptop to connect to a remote DevBox server running Ollama.
+`ollama-setup.sh` adds shell shortcuts on your laptop for the DevBox Ollama API at `http://ollama.internal`, which sits behind Traefik basic auth. For IDEs and other clients, see [docs/remote-ide-setup.md](../../docs/remote-ide-setup.md).
 
-## Prerequisites
+## Requirements
 
-1. A running DevBox server with Ollama configured
-2. Tailscale installed on both server and laptop
-3. Server's Tailscale IP address (run `tailscale ip -4` on server)
-
-## Available Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `ollama-setup.sh` | Add shell functions for quick AI queries |
-| `zed-setup.sh` | Configure Zed editor for remote Ollama |
-| `shell-config.txt` | Shell configuration snippet (copy-paste) |
+- The laptop is on the same tailnet as the server.
+- `ollama.internal` resolves to the server's Tailscale IP, for example via `/etc/hosts`: `100.x.y.z  ollama.internal ai.internal`.
+- `curl` and `jq` are installed.
 
 ## Usage
 
-### Quick Shell Setup
-
 ```bash
-# Set your server's Tailscale IP
-export OLLAMA_SERVER_IP="100.x.x.x"
-
-# Run the setup script
-bash scripts/laptop/ollama-setup.sh
+DEVBOX_OLLAMA_AUTH="$(ssh -p 5522 dev@<server> cat docker/.secrets/ollama-auth.txt)" \
+  bash scripts/laptop/ollama-setup.sh
+source ~/.zshrc        # or ~/.bashrc / ~/.profile, as reported by the script
 ```
 
-After running, you have these commands available:
+Optional variables:
+
+| Variable | Default |
+|---|---|
+| `DEVBOX_OLLAMA_URL` | `http://ollama.internal` (use `https://ollama.<domain>` in HTTPS mode) |
+| `DEVBOX_OLLAMA_MODEL` | `llama3.2` (must be pulled on the server) |
+
+The script:
+
+- Stores the credential in `~/.config/devbox/ollama.curlrc` (mode 0600). curl reads it with `-K`, so the password never appears on a command line.
+- Calls `/api/version` and warns if it doesn't return HTTP 200.
+- Writes a managed block, delimited by `# >>> devbox-ollama` and `# <<< devbox-ollama <<<`, into the rc file of your login shell: `~/.zshrc`, `~/.bashrc` or `~/.profile`. Re-running the script replaces the block instead of appending another one.
+
+## Commands
 
 ```bash
-ask "What is Python?"          # Quick answer
-askcode "Write hello world"    # Code-focused answer
-chat "Explain Docker"          # Streaming response
-ollamals                       # List remote models
+ask "What does set -euo pipefail do?"     # one-shot answer
+askcode "Bash loop over lines of a file"  # coding-assistant prompt
+chat "Explain cgroups"                    # streamed answer
+ollamals                                  # models on the server
 ```
 
-### Zed Editor Setup
+To use another model, change `DEVBOX_OLLAMA_MODEL` in your shell or re-run the script with it set.
 
-```bash
-export OLLAMA_SERVER_IP="100.x.x.x"
-bash scripts/laptop/zed-setup.sh
-```
+## After rotating the credential
 
-This creates `~/.config/zed/settings.json` with Ollama configuration.
+When `~/docker/rotate-ollama-auth.sh` has run on the server, run the usage command again to store the new credential.
 
-### Manual Setup
+## Removal
 
-If you prefer manual configuration, copy the contents of `shell-config.txt` to your `~/.bashrc` or `~/.zshrc` and update the `OLLAMA_SERVER_IP` variable.
-
-## Finding Your Server IP
-
-```bash
-# On your server
-tailscale ip -4
-
-# Or from your laptop via SSH
-ssh your-server "tailscale ip -4"
-```
-
-## See Also
-
-- [Remote IDE Setup](../../docs/remote-ide-setup.md) — Complete IDE configuration guide
-- [Ollama Optimization](../../docs/ollama-optimization.md) — Server-side performance tuning
+Delete the `devbox-ollama` block from your rc file, then run `rm ~/.config/devbox/ollama.curlrc`.

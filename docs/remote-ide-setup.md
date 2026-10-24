@@ -1,414 +1,77 @@
-# Remote IDE Setup
+# Using the server's models from your laptop
 
-This guide explains how to connect your local IDE and CLI tools to an Ollama instance running on a remote DevBox server.
+IDEs, CLIs and scripts on another tailnet device can use the server's Ollama models through Traefik. Ollama's port 11434 is not published on the host, so guides that point at `<tailscale-ip>:11434` won't work.
 
-## Table of Contents
+| Endpoint | Auth | API | Fits |
+|---|---|---|---|
+| `http://ollama.internal` (or `https://ollama.<domain>`) | HTTP basic auth, user `ollama` | Native Ollama API (`/api/tags`, `/api/generate`, `/api/chat`, ...) | Clients with an Ollama provider that can send a custom `Authorization` header |
+| `http://ai.internal/api` (or `https://ai.<domain>/api`) | Open WebUI API key, sent as a Bearer token | OpenAI-compatible (`/api/models`, `/api/chat/completions`) | Clients with an "OpenAI-compatible" provider |
 
-- [Overview](#overview)
-- [Connection Methods](#connection-methods)
-- [IDE Configuration](#ide-configuration)
-- [CLI Configuration](#cli-configuration)
-- [Shell Functions](#shell-functions)
-- [Recommended Models](#recommended-models)
-- [Troubleshooting](#troubleshooting)
+## Prerequisites
 
-## Overview
+- The laptop is on the same tailnet (`tailscale status`).
+- The names resolve to the server's Tailscale IP. Add to `/etc/hosts`: `100.x.y.z  ai.internal ollama.internal traefik.internal exegol.internal`. In HTTPS mode, use DNS instead ([https-setup.md](https-setup.md#4-name-resolution-on-clients)).
+- At least one model is pulled on the server: `docker exec ollama ollama pull qwen3`, the `opull` alias, or the Open WebUI model settings. Pick sizes that fit `OLLAMA_MEM_LIMIT` ([ollama-optimization.md](ollama-optimization.md)).
 
-By default, Ollama runs on `127.0.0.1:11434` (localhost only) on the remote server. This guide covers two methods to access it from your local machine:
+## Ollama API with basic auth
 
-1. **SSH Port Forwarding**: Best for temporary connections and maximum security
-2. **Tailscale Network Binding**: Best for always-on access and convenience
-
-### Prerequisites
-
-Before starting, you need your server's Tailscale IP:
+Fetch the credential and test it:
 
 ```bash
-# Run on your server
-tailscale ip -4
-
-# Or from your laptop via SSH
-ssh your-server "tailscale ip -4"
+CRED=$(ssh -p 5522 dev@<server> cat docker/.secrets/ollama-auth.txt)   # ollama:<password>
+curl -u "$CRED" http://ollama.internal/api/tags
+curl -u "$CRED" http://ollama.internal/api/generate -d '{"model":"qwen3","prompt":"Say hi","stream":false}'
 ```
 
-Set the environment variable for all scripts:
+For shell shortcuts (`ask`, `askcode`, `chat`, `ollamals`), see [scripts/laptop/README.md](../scripts/laptop/README.md).
+
+To configure an IDE or other client:
+
+- **Base URL:** `http://ollama.internal`, with no `:11434` and no `/api` suffix, unless the client asks for the full API path.
+- **Auth:** the client must support one of these:
+  - A custom request header: `Authorization: Basic <base64 of ollama:password>`. Generate the value with `printf '%s' "$CRED" | base64 | tr -d '\n'`.
+  - Credentials in the URL: `http://ollama:<password>@ollama.internal`. Many HTTP libraries turn URL credentials into basic auth, but not every client passes them through.
+
+Header and provider settings differ between clients and versions, so check your client's documentation for "custom headers" or "request options". If it supports neither form, use one of the alternatives below.
+
+After `~/docker/rotate-ollama-auth.sh`, fetch the credential again and update every client.
+
+## Alternative: Open WebUI API key
+
+Open WebUI requires a signed-in user or an API key, and does not use the Ollama basic-auth credential.
+
+1. In Open WebUI, go to **Settings → Account → API keys** and create a key. If the section is missing, an admin first has to enable API keys or grant users that permission in the Admin Panel settings. Where these options live depends on the Open WebUI version.
+2. Test it:
+
+   ```bash
+   curl -H "Authorization: Bearer $OPENWEBUI_KEY" http://ai.internal/api/models
+   curl -H "Authorization: Bearer $OPENWEBUI_KEY" -H 'Content-Type: application/json' \
+     http://ai.internal/api/chat/completions \
+     -d '{"model":"qwen3","messages":[{"role":"user","content":"Say hi"}]}'
+   ```
+3. In an OpenAI-compatible client, set the base URL to `http://ai.internal/api`, the API key to the Open WebUI key, and the model to a name from `/api/models`.
+
+Open WebUI also proxies the native Ollama API under `/ollama/`, for example `http://ai.internal/ollama/api/tags`. That path accepts the same Bearer key, which helps with Ollama clients that support an API key but not basic auth. Verify it against your Open WebUI version before relying on it.
+
+## Alternative: SSH tunnel to the container
+
+For tools that can't send credentials at all, such as the official `ollama` CLI with `OLLAMA_HOST`, forward a local port to the Ollama container over SSH. This skips basic auth, which is acceptable because SSH access is already root-equivalent.
 
 ```bash
-export OLLAMA_SERVER_IP="100.x.x.x"  # Replace with your Tailscale IP
+OLLAMA_IP=$(ssh -p 5522 dev@<server> "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ollama")
+ssh -p 5522 -N -L 11434:"$OLLAMA_IP":11434 dev@<server> &
+OLLAMA_HOST=http://127.0.0.1:11434 ollama list
 ```
 
-## Connection Methods
-
-### Method 1: SSH Port Forwarding
-
-**Best for**: Maximum security, temporary connections, testing.
-
-**Setup**:
-
-```bash
-# Forward remote port 11434 to local port 11434
-ssh -L 11434:127.0.0.1:11434 user@remote-server -p 5522 -N
-
-# Run in background
-ssh -L 11434:127.0.0.1:11434 user@remote-server -p 5522 -N -f
-
-# Persistent tunnel (requires autossh)
-autossh -M 0 -L 11434:127.0.0.1:11434 user@remote-server -p 5522 -N
-```
-
-**Client Configuration**:
-- IDE endpoint: `http://localhost:11434`
-- CLI: No configuration needed (uses localhost by default)
-
-### Method 2: Tailscale Network Binding
-
-**Best for**: Always-on access, convenience, multiple clients.
-
-**Step 1: Configure Ollama Docker**
-
-Edit `~/docker/ollama-openwebui/docker-compose.yml` on your server:
-
-```yaml
-services:
-  ollama:
-    environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-    ports:
-      - "100.x.x.x:11434:11434"  # Replace with your Tailscale IP
-```
-
-**Step 2: Restart Ollama**
-
-```bash
-cd ~/docker/ollama-openwebui
-docker compose down ollama && docker compose up -d ollama
-```
-
-**Step 3: Verify Connection**
-
-```bash
-curl http://100.x.x.x:11434/api/tags
-```
-
-**Client Configuration**:
-- IDE endpoint: `http://100.x.x.x:11434` (your Tailscale IP)
-- CLI: `export OLLAMA_HOST=http://100.x.x.x:11434`
-
-### Security Comparison
-
-| Method | Security | Setup | Maintenance | Network Exposure |
-|--------|----------|-------|-------------|------------------|
-| SSH Tunnel | High | Simple | Active tunnel required | Localhost only |
-| Tailscale (IP-bound) | High | Moderate | None | Tailscale network only |
-| Bind to 0.0.0.0:11434 | **Unsafe** | Simple | None | **All interfaces** |
-
-**Warning**: Never use `ports: - "11434:11434"` without an IP prefix. This exposes Ollama on all network interfaces, including public IPs.
-
-## IDE Configuration
-
-### Zed Editor
-
-Edit `~/.config/zed/settings.json`:
-
-**For SSH Tunnel**:
-
-```json
-{
-  "language_models": {
-    "ollama": {
-      "api_url": "http://localhost:11434",
-      "low_speed_timeout_in_seconds": 120
-    }
-  },
-  "assistant": {
-    "version": "2",
-    "default_model": {
-      "provider": "ollama",
-      "model": "qwen3"
-    }
-  }
-}
-```
-
-**For Tailscale**:
-
-```json
-{
-  "language_models": {
-    "ollama": {
-      "api_url": "http://100.x.x.x:11434",
-      "low_speed_timeout_in_seconds": 120
-    }
-  },
-  "assistant": {
-    "version": "2",
-    "default_model": {
-      "provider": "ollama",
-      "model": "qwen3"
-    }
-  }
-}
-```
-
-**Automated Setup Script**:
-
-```bash
-export OLLAMA_SERVER_IP="100.x.x.x"  # Your Tailscale IP
-bash scripts/laptop/zed-setup.sh
-```
-
-**Keyboard Shortcuts**:
-
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+Enter / Cmd+Enter | Open Assistant panel |
-| Ctrl+Shift+A | Insert AI suggestion |
-| / in Assistant | Slash commands menu |
-| Escape | Close Assistant |
-
-### VS Code with Continue Extension
-
-1. Install the Continue extension
-2. Open Continue settings (Ctrl+Shift+P, "Continue: Open Settings")
-3. Add Ollama as a provider:
-
-```json
-{
-  "models": [
-    {
-      "title": "Remote Ollama",
-      "provider": "ollama",
-      "model": "qwen3",
-      "apiBase": "http://100.x.x.x:11434"
-    }
-  ]
-}
-```
-
-### Multiple Models Configuration
-
-For IDEs that support multiple models:
-
-```json
-{
-  "language_models": {
-    "ollama": {
-      "api_url": "http://100.x.x.x:11434",
-      "low_speed_timeout_in_seconds": 120,
-      "available_models": [
-        {
-          "name": "qwen3",
-          "display_name": "Qwen3",
-          "max_tokens": 8192,
-          "supports_tools": true
-        },
-        {
-          "name": "codellama",
-          "display_name": "Code Llama",
-          "max_tokens": 4096,
-          "supports_tools": false
-        }
-      ]
-    }
-  }
-}
-```
-
-## CLI Configuration
-
-### Ollama CLI
-
-**SSH Tunnel Method**:
-
-```bash
-# No configuration needed - CLI uses localhost:11434 by default
-ollama list
-ollama run qwen3
-```
-
-**Tailscale Method**:
-
-```bash
-# Set environment variable
-export OLLAMA_HOST="http://100.x.x.x:11434"
-
-# Make permanent (add to ~/.bashrc or ~/.zshrc)
-echo 'export OLLAMA_SERVER_IP="100.x.x.x"' >> ~/.bashrc
-echo 'export OLLAMA_HOST="http://${OLLAMA_SERVER_IP}:11434"' >> ~/.bashrc
-source ~/.bashrc
-
-# Use normally
-ollama list
-ollama run qwen3
-```
-
-### API Testing
-
-```bash
-# List available models
-curl http://localhost:11434/api/tags | jq '.models[].name'
-
-# Test generation
-curl http://localhost:11434/api/generate -d '{
-  "model": "qwen3",
-  "prompt": "Hello, world!",
-  "stream": false
-}'
-```
-
-## Shell Functions
-
-Add these functions to your `~/.bashrc` or `~/.zshrc` for quick AI access:
-
-```bash
-# Quick ask - get just the answer
-ask() {
-    if [ -z "$1" ]; then
-        echo "Usage: ask \"your question here\""
-        return 1
-    fi
-    local prompt="$*"
-    curl -s "$OLLAMA_HOST/api/generate" -d "{
-        \"model\": \"qwen3\",
-        \"prompt\": \"$prompt\",
-        \"stream\": false
-    }" | jq -r '.response'
-}
-
-# Code-specific questions
-askcode() {
-    if [ -z "$1" ]; then
-        echo "Usage: askcode \"your code question\""
-        return 1
-    fi
-    local prompt="You are a coding assistant. Answer concisely with code when appropriate. Question: $*"
-    curl -s "$OLLAMA_HOST/api/generate" -d "{
-        \"model\": \"qwen3\",
-        \"prompt\": \"$prompt\",
-        \"stream\": false
-    }" | jq -r '.response'
-}
-
-# Chat with streaming
-chat() {
-    if [ -z "$1" ]; then
-        echo "Usage: chat \"your question\""
-        return 1
-    fi
-    local prompt="$*"
-    curl -s "$OLLAMA_HOST/api/generate" -d "{
-        \"model\": \"qwen3\",
-        \"prompt\": \"$prompt\",
-        \"stream\": true
-    }" | while IFS= read -r line; do
-        echo "$line" | jq -r '.response // empty' | tr -d '\n'
-    done
-    echo ""
-}
-
-# List remote models
-alias ollamals='curl -s $OLLAMA_HOST/api/tags | jq -r ".models[].name"'
-```
-
-**Automated Setup Script**:
-
-```bash
-export OLLAMA_SERVER_IP="100.x.x.x"
-bash scripts/laptop/ollama-setup.sh
-```
-
-## Recommended Models
-
-| Model | Size | Use Case | Tool Support |
-|-------|------|----------|--------------|
-| qwen3 | Varies | General coding, agentic tasks | Yes |
-| devstral | Medium | Code completion | Yes |
-| codellama | 7B-34B | Code generation | Limited |
-| deepseek-coder-v2 | 16B-236B | Advanced coding | Yes |
-
-**Note**: Local models have limitations compared to cloud models (Claude, GPT-4) for complex agentic tasks requiring multi-step operations and file manipulation.
+The container IP can change when the container is recreated, for example after an update. Look it up again if the tunnel stops working.
 
 ## Troubleshooting
 
-### Port Already in Use (SSH Tunnel)
-
-**Diagnosis**:
-
-```bash
-sudo lsof -i :11434
-```
-
-**Solutions**:
-
-1. Stop local Ollama: `sudo systemctl stop ollama`
-2. Use different local port: `ssh -L 11435:127.0.0.1:11434 remote -N`
-3. Kill existing tunnel: `pkill -f "11434:127.0.0.1:11434"`
-
-### Connection Failures
-
-**Check network connectivity**:
-
-```bash
-# Verify Tailscale
-tailscale status
-ping 100.x.x.x
-
-# Test port accessibility
-curl http://100.x.x.x:11434/api/tags
-```
-
-**Verify OLLAMA_HOST**:
-
-```bash
-echo $OLLAMA_HOST
-# Should output: http://100.x.x.x:11434
-```
-
-**Check tunnel status**:
-
-```bash
-ps aux | grep "ssh.*11434"
-```
-
-### IDE Not Detecting Models
-
-1. Verify API connection: `curl http://endpoint/api/tags`
-2. Restart IDE completely
-3. Check IDE logs for connection errors
-4. Verify firewall settings
-
-### Slow Performance
-
-Local models require significant compute resources:
-
-- Large models (30B+) are slow on CPU
-- Verify GPU usage: `docker logs ollama 2>&1 | grep -i gpu`
-- Consider smaller models for faster responses
-- Increase timeout in IDE: `"low_speed_timeout_in_seconds": 120`
-
-### Zed-Specific Issues
-
-**"Failed to connect to language model"**:
-
-1. Check Tailscale connection:
-   ```bash
-   curl http://100.x.x.x:11434/api/tags
-   ```
-2. Ensure Tailscale is running: `tailscale status`
-3. Check Zed logs: Ctrl+Shift+P, type "zed: open log"
-
-**Models not showing up**:
-
-1. Restart Zed completely
-2. Check Assistant Panel settings (open with Ctrl+Enter)
-3. Manually refresh: `curl http://100.x.x.x:11434/api/tags`
-
-## References
-
-- [Zed LLM Providers](https://zed.dev/docs/ai/llm-providers)
-- [Ollama Documentation](https://docs.ollama.com/)
-- [Tailscale Documentation](https://tailscale.com/kb/)
-
----
-
-*Last updated: 2026-05-16 (v1.0.0)*
+| Symptom | Cause | Fix |
+|---|---|---|
+| Connection timeout | The laptop isn't on the tailnet, the hosts entry is wrong, or an ACL blocks the server | `tailscale ping <server>`, then check `/etc/hosts` |
+| `401 Unauthorized` | Missing or stale credential | Fetch `ollama-auth.txt` again. Check the base64 value has no trailing newline. |
+| `403 Forbidden` | The source address isn't a Tailscale address | Connect directly through Tailscale, not through a subnet router or proxy |
+| `404` on `/v1/...` or `/api/...` | Wrong base URL for the provider type | Ollama provider: `http://ollama.internal`. OpenAI-compatible provider: `http://ai.internal/api`. |
+| Model list empty | No models pulled | `docker exec ollama ollama pull <model>` |
+| Very slow first answer | The model is loading, or running on CPU | Keep it loaded longer, or use a smaller model ([ollama-optimization.md](ollama-optimization.md)) |

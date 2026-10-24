@@ -4,65 +4,103 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-DevBox: a Bash + Docker Compose host bootstrapper for Ubuntu 24.04. No compiled code, no package manager. Everything is shell scripts, Compose YAML, templates, and Bats tests. Toolchain: Bash 5+, Docker Compose v2.22+, ShellCheck, bats-core.
+DevBox: a Bash + Docker Compose host bootstrapper for Ubuntu 24.04. There is no compiled code and no package manager. The repo is shell scripts, Compose YAML, templates and Bats tests. Toolchain: Bash 5+, Docker with the Compose v2 plugin, ShellCheck, bats (install with apt), jq, gpg, openssl, envsubst (gettext-base) and systemd-analyze.
 
 ## Commands
 
 ```bash
-make test                      # full CI-equivalent gate: lint (incl. all bats) + compose-check + anchor-check
-make lint                      # bash -n + shellcheck (warning+, excl SC1091/SC2312) + docs-tree check + bats tests/unit tests/contract
-make compose-check             # docker compose config for each service, HTTP and HTTPS overlay, dummy env
-make anchor-check              # x-logging: block must be byte-identical across services/*/docker-compose.yml
-bats tests/unit tests/contract # all 90 tests, ~10s (htb-vpn tests use a tun0 sentinel to skip the 10s poll)
-bats tests/unit/fetch-verify.bats                       # one file
-bats -f "render_env" tests/unit/render-env.bats         # one test by name regex
-./scripts/update-images.sh --check     # digest lockfile drift (CI gates on this); --apply to regenerate
-./scripts/update-manifest.sh --check   # download SHA manifest drift; --apply to refresh
-./setup.sh --dry-run                   # preview install phases, no root, no host changes
-./setup.sh --check                     # repo sanity + installed-contract sync check, no root
+make test                     # static CI job: lint + docs-check + bats + compose-check
+make ci-fast                  # scripts/ci/local.sh --fast: static job with a pass/fail summary and log paths
+make ci                       # full CI mirror, including the e2e install in a throwaway container (pre-push runs this)
+make e2e                      # only the e2e install (scripts/ci/e2e-container.sh; needs ~15 GB of disk)
+make hooks                    # enable .githooks/pre-push (CI_FAST=1 git push skips e2e)
+bats tests/unit tests/contract                        # all bats tests
+bats tests/unit/devbox-lib.bats                       # one file
+bats -f "env_set" tests/unit/devbox-lib.bats          # tests whose name matches a regex
+scripts/ci/check-docs-tree.sh                         # doc path references must exist
+scripts/update-images.sh --apply|--check              # regenerate/check digest locks (queries registries)
+scripts/update-pins.sh --apply|--check                # check vendor key fingerprints, bump the Oh My Zsh commit (network)
+./setup.sh --dry-run                                  # preflight + plan + rsync diff, no root, no changes
+./setup.sh --check                                    # installed contract vs repo, no root
 ```
 
-`make start|stop|status|backup|security-check|rotate-ollama-auth|install-systemd` require an installed stack (`~/docker/lib/.devbox-marker`). `make doctor` diagnoses install state.
+`make start|stop|status|backup|security-check|rotate-ollama-auth|install-systemd` need an installed stack (`~/docker/lib/.devbox-marker`). `make doctor` runs `setup.sh --check` and then `status.sh`.
 
-CI (`.github/workflows/pr-validate.yml`) runs exactly: `lint.sh`, `check-compose-config.sh`, `check-anchor-consistency.sh`, `check-docs-tree.sh`, `update-images.sh --check`. `monthly-rebuild.yml` opens PRs for lockfile/alpine digest refresh and signs the release tarball; never auto-merges.
+CI: `.github/workflows/pr-validate.yml` has two jobs. `static` runs `scripts/ci/lint.sh`, `scripts/ci/check-docs-tree.sh`, `bats tests/unit tests/contract` and `scripts/ci/check-compose-config.sh`. `e2e` runs `scripts/ci/e2e.sh`, a real install on the runner. `scripts/ci/local.sh` mirrors both jobs 1:1: when you add a CI step, add it there in the same commit. `.github/workflows/monthly-rebuild.yml` opens one refresh PR (digest locks + pins, smoke-tested) and publishes a cosign-signed release tarball. It never pushes to `main`. PR CI never queries registries.
 
 ## Architecture: repo vs installed tree
 
-The repo is the source; `~/docker/` is the installed runtime. `setup.sh` rsyncs `services/`, `scripts/host/`, `scripts/lib/`, `scripts/systemd/` into `~/docker/`, renders `*.template` files with whitelisted envsubst (`render_env`), writes `~/.config/devbox/config.env` and the `.devbox-marker`, then exits. Helpers run from `~/docker/`, never from the repo. Never hand-edit `~/docker/`; a re-run of `setup.sh` overwrites it (snapshots go to `~/.local/share/devbox/backups/`).
+The repo is the source. `~/docker/` is the installed runtime. `setup.sh` converges the host in phases:
 
-### The runtime contract (`scripts/lib/devbox-contract.sh`)
+1. packages
+2. vendor apt repos
+3. Tailscale
+4. operator user
+5. Docker defaults
+6. mise toolchain
+7. stack
+8. sshd/fail2ban/UFW
 
-Single source of truth for service list, install dirs, compose file names, container names, Traefik hosts, named volumes, backup paths, and the pinned alpine backup image. `setup.sh` installs a copy to `~/docker/lib/`; that installed copy is the runtime authority. Helpers source it via `. devbox-contract.sh` and use accessors `devbox_get <svc> <KEY>`, `devbox_compose_chain_for`, `devbox_compose_chain_key`, `devbox_contract_warn_drift`.
+In the stack phase, it rsyncs `services/<svc>/`, `scripts/host/*.sh`, `scripts/lib/devbox-contract.sh`, `scripts/lib/devbox-lib.sh` and `scripts/systemd/*.template` into `~/docker/`. Then it renders templates and writes `~/.config/devbox/config.env` and `~/docker/lib/.devbox-marker`. Helpers run from `~/docker/`, never from the repo. They compute `DEVBOX_HOME` from their own location, because `sudo` sets `HOME=/root`, and `contract.bats` enforces this.
 
-Constraints when touching it:
-- Must stay POSIX-sh source-safe: no `local`, no bashisms except the `DEVBOX_SERVICES` array. Accessors `unset` their temporaries instead.
-- Adding a service means adding every `DEVBOX_*_<svc>` variable, a `services/<svc>/` compose dir with `docker-compose.yml` + `docker-compose.https.yml` + `docker-compose.lock.yml`, and a `.env.template`. `tests/contract/contract.bats` pins the shape: every host in `DEVBOX_HOST_*` needs a matching `Host(...)` router label, every named volume must be backed up, every `container_name` must appear in `security-check.sh`, and keys read by helpers from `config.env` must be a subset of keys `setup.sh` emits.
-- Bump `DEVBOX_CONTRACT_VERSION` on schema-incompatible changes.
+Installed files fall into three classes. Keep them distinct:
 
-### Compose chain and HTTPS
+- **Tracked:** mirrored with `rsync --delete` on every run. Excluded from the mirror: dotfiles, `ovh.env`, `letsencrypt/`, `logs/`, `dynamic/*-auth.yml`, `*.template`.
+- **Operator-owned, created once:** each service `.env` (`render_once`), the credentials in `~/docker/.secrets/` (`ensure_credential`), `ovh.env`. ACME state lives in the Traefik-owned named volume `traefik_letsencrypt`, not on the host.
+- **Derived, re-rendered every run:**
+  - `dynamic/dashboard-auth.yml` and `dynamic/ollama-auth.yml` (`render_basic_auth`, no `$$` escaping). They are mode 0640, and Traefik reads them via `group_add: ${DEVBOX_GID:?}`, because with `cap_drop: ALL` root cannot read operator-owned 0600 files.
+  - `traefik.yml` in HTTPS mode.
+  - The setup-managed `.env` keys: `COMPOSE_FILE`, `TAILSCALE_IP`, `DEVBOX_GID`, `DOMAIN`, and the `OLLAMA_CPUS` default.
+  - Setup's own keys in `config.env`, upserted with `env_set`; operator keys such as `BACKUP_GPG_RECIPIENT` are preserved.
 
-Compose files are chained per service as `docker-compose.yml[:docker-compose.https.yml][:docker-compose.lock.yml]`, emitted into `config.env` as `COMPOSE_FILE_<SVC_UPPER>`. HTTPS is an opt-in overlay (`ENABLE_HTTPS=true` plus `DOMAIN` in `config.env`, overridable at install time via `DEVBOX_DOMAIN` env, OVH DNS-01 creds in `~/.config/devbox/ovh.env`), not a separate compose file set. Both modes bind only to the Tailscale IP; never introduce a `0.0.0.0` listener. Lockfiles are generated by `update-images.sh --apply` from `compose --lock-image-digests`; never edit digests by hand.
+The operator is `DEVBOX_USER`, else the name recorded in the root-owned `/etc/devbox/operator` (trusted only when owned by root with mode 644), else `dev`. Never infer it from user-writable paths.
 
-Image tags are minor-pinned (`traefik:v3.7`, `open-webui:0.11`) so monthly CI picks up patches. Ollama and docker-socket-proxy publish no minor tags, so they are patch-pinned (`0.33.3`, `v0.5.0`) and only move when bumped by hand; `contract.bats` asserts the exact ollama tag.
+Preflight is read-only and collects every error before the first change. SSH lockdown runs last. The drop-in is `00-devbox.conf`, so it wins over cloud-init's `50-`. It is checked with `sshd -t` and `sshd -T`, sshd must be listening on the new port before UFW is touched, and any failure rolls back. Root never sources operator-owned files: `config.env` and `ovh.env` are parsed with `sed` (`devbox_config_get`, `env_get`).
 
-### Verified downloads
+### Runtime contract and shared library
 
-Every external installer goes through `fetch_and_verify` in `scripts/lib/fetch-verify.sh`, with URL + SHA256 pinned in `scripts/lib/download-manifest.sh`. Per-tool resolvers live in `scripts/lib/sources/<tool>.sh` and print `URL\tSHA256`; `update-manifest.sh --apply` runs them to refresh hashes. Do not add a raw `curl | sh`. `DEVBOX_ALLOW_UNVERIFIED=1` is the only bypass and is deliberate.
+`scripts/lib/devbox-contract.sh` declares the service list (dependency order), container names, Traefik hosts, install paths and backup scope. Its accessors are `devbox_get <svc> CONTAINERS|HOST` and `devbox_config_get <KEY> [default]`. It is bash-only (`DEVBOX_SERVICES` is an array) and stays declarative. Bump `DEVBOX_CONTRACT_VERSION` on schema-incompatible changes. The installed copy is the runtime authority, and `setup.sh --check` reports drift.
+
+`scripts/lib/devbox-lib.sh` holds the shared functions: `write_atomic`, `render_template`, `render_once`, credentials, `env_set`/`env_default`/`env_unset`, `compose_file_chain`, `rsync_install`, `collision_guard`, `gpg_export_pinned`, `apt_add_repo`. `setup.sh` and the helpers source it, and `tests/unit/devbox-lib.bats` tests it directly. Keep the pure functions free of host mutation and pass paths explicitly.
+
+Adding a service means all of the following:
+
+- a `DEVBOX_SERVICES` entry, plus `DEVBOX_CONTAINERS_<svc>` and `DEVBOX_HOST_<svc>` (dashes become underscores);
+- `services/<svc>/docker-compose.yml` with `name: <svc>`, a `container_name` for each container, `Host()` rules equal to the contract hosts, and the hardening (`no-new-privileges`, `cap_drop: ALL`, `mem_limit`, healthcheck);
+- a lock generated with `scripts/update-images.sh --apply`.
+
+`tests/contract/contract.bats` enforces all of this. See `services/README.md`.
+
+### Compose chain, binding, HTTPS
+
+Each service's `.env` sets native `COMPOSE_FILE=docker-compose.yml[:docker-compose.https.yml][:docker-compose.gpu.yml]:docker-compose.lock.yml` (`compose_file_chain`). Plain `docker compose` in the directory therefore always uses the full chain, and the digest lock always applies. Top-level `name:` pins project and volume names.
+
+Only Traefik publishes ports, and only on `${TAILSCALE_IP:?}`. Never introduce a `0.0.0.0` bind or a `${VAR:-}` default for a bind address or secret: Docker-published ports bypass UFW. `check-compose-config.sh` validates every HTTP/HTTPS/GPU chain and fails on wildcard binds.
+
+HTTPS is an opt-in overlay (`ENABLE_HTTPS`, `DEVBOX_DOMAIN`, `DEVBOX_EMAIL`, OVH DNS-01 credentials in `~/.config/devbox/ovh.env`), still bound to the Tailscale IP. The entrypoint middlewares (security headers + Tailscale allowlist; HSTS on `websecure`) apply to every router.
+
+### Images and trust
+
+Base files pin minor tags (`traefik:v3.7`, `open-webui:0.12`). Images without minor tags are patch-pinned and bumped by hand: `ollama/ollama:0.40.10` and `tecnativa/docker-socket-proxy:v0.5.0`. Locks (`repo:tag@sha256:<index digest>`) come only from `scripts/update-images.sh --apply`; never edit them by hand. `contract.bats` checks offline that each lock pins exactly the base tags.
+
+There is no `curl | sh` anywhere. Tailscale and mise come from vendor apt repos whose signing-key fingerprints are pinned in `scripts/lib/pins.sh` (`apt_add_repo` → `gpg_export_pinned`). Dev tools come from `scripts/install/mise-config.toml` (explicit `aqua:` backends so mise verifies checksums and attestations; `pypi:exegol`). AI CLIs come from `scripts/host/install-ai-dev-stack.sh`, also through mise. Oh My Zsh is pinned by commit. `update-pins.sh` never changes fingerprints automatically.
 
 ### Tests
 
-- `tests/unit/` — pure logic, no network, no real binaries. `fetch-verify.bats` uses `file://` URLs; `htb-vpn-pidfile.bats` prepends fake `openvpn`/`ip`/`pkill`/`sudo` shims from `tests/unit/fixtures/bin/`; `anchor-consistency.bats` works on a tmpdir copy of `services/`.
-- `tests/contract/` — shape assertions across contract, compose files, and host helpers. `contract.bats` also verifies a dry install copies the contract byte-identically.
-- `render_env` is duplicated standalone in `tests/lib/test-helpers.bash` for testability; keep it in sync with `setup.sh`.
+- `tests/unit/devbox-lib.bats`: the library functions in temp dirs. The gpg key test generates throwaway keys.
+- `tests/unit/htb-vpn.bats`: `scripts/host/htb-vpn.sh` against fake `sudo`/`openvpn`/`ip` written into a temp `PATH`. A `tun0` sentinel file stands in for the interface. It covers the PID file, refusing to signal a non-openvpn PID, and the action-first `stop`/`status` form.
+- `tests/contract/contract.bats`: compares the contract, the compose files as resolved by `docker compose config --format json` (needs the Docker CLI), the locks and the helpers.
+- `tests/contract/systemd.bats`: renders the unit templates and runs `systemd-analyze verify`.
+- `scripts/ci/e2e.sh`: a real install, routing, auth, rotation, re-run idempotency, backup/restore and systemd. It reconfigures the host, so run it only through `make e2e` or in CI.
 
 ### Docs are CI-checked
 
-`check-docs-tree.sh` greps README.md, services/README.md, and docs/*.md for `services/...` and `scripts/...` paths and fails if any path does not exist. Renaming or moving a script means updating every doc that mentions it. `docs/adr/` is exempt.
+`scripts/ci/check-docs-tree.sh` scans `README.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `services/README.md`, `tests/README.md`, `scripts/laptop/README.md` and `docs/*.md`. It fails on any `services/…`, `scripts/…`, `tests/…` or `.github/workflows/*.yml` path that does not exist. Paths containing `<` or `*` are skipped as placeholders. When you rename or delete a file, update every doc that mentions it.
 
 ## Conventions
 
-- `#!/usr/bin/env bash`, `set -euo pipefail`, quoted expansions, `lower_snake` functions, `UPPER` constants. Shell indents 4 spaces, Bats and YAML 2, Makefile tabs.
-- Secrets: rendered `.env` files, `acme.json`, `*.ovpn`, keys are gitignored. Only `.env.template` / `.env.example` are tracked. Secret files get mode `0600`.
-- Compose services keep `no-new-privileges`, `cap_drop`, healthchecks, resource limits, and the shared `x-logging` anchor.
+- `#!/usr/bin/env bash`, `set -euo pipefail`, quoted expansions, `lower_snake` functions, `UPPER` constants. Indent shell with 4 spaces, Bats and YAML with 2, Makefile with tabs. ShellCheck runs at warning level and above, excluding only SC1091.
+- Secrets: rendered `.env` files, `ovh.env`, `acme.json`, `.secrets/`, `*.ovpn` and keys are gitignored. Only `.env.template` and `.env.example` are tracked. Secret files are mode 0600 (the auth middlewares 0640); write them with `write_atomic`.
+- Compose services keep `no-new-privileges`, `cap_drop: ALL`, healthchecks and resource limits. No per-file logging blocks: log rotation comes from `/etc/docker/daemon.json`.
 - Commits: `type: short description` (`feat|fix|docs|refactor|test|chore`).
-- `ARCHITECTURE.md` records load-bearing decisions with drivers and rejected alternatives. Read the relevant section before changing install layout, HTTPS, pinning, downloads, systemd, or backup behavior, and update it when the decision changes.
+- `ARCHITECTURE.md` records the load-bearing decisions (Decision / Drivers / Rejected / Consequences). Read the relevant entry before you change install layout, networking, HTTPS, pinning, downloads, backups, systemd or CI, and update it when the decision changes.

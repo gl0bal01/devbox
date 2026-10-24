@@ -1,195 +1,89 @@
-# Exegol Multi-Container Guide
+# Exegol and HTB VPN
 
-Run multiple Exegol penetration testing containers simultaneously with browser-based remote desktop access, using the official Exegol CLI.
+[Exegol](https://exegol.com) containers with a browser desktop (noVNC) reachable over Tailscale, plus a host-side OpenVPN helper for HTB/THM labs. Exegol containers are not hardened like the rest of the stack. See [security.md](security.md#boundaries).
 
-## CLI Commands (Official `exegol`)
+## Prerequisites
 
-```bash
-exegol info                           # List all containers and their status
-exegol stop my-box                    # Stop a running container
-exegol rm my-box                      # Remove a container entirely
-```
+- The `exegol` CLI is installed by setup.sh through mise (`pypi:exegol`), unless you used `--no-dev-tools`. If you get `command not found`, open a new login shell, or run `mise install` as the operator.
+- On the first start the Exegol CLI asks you to accept its EULA. It may also ask you to activate a licence (the free Community plan is for personal, non-commercial use). It then downloads the `free` image, which is several GB. To fetch the image in advance: `exegol install free`.
+- Clients resolve `exegol.internal` to the server's Tailscale IP (the same hosts entry as `ai.internal`). The Tailscale IP works directly too.
 
-## `exegol-start.sh` Wrapper
-
-The wrapper script calls the official `exegol` CLI with sensible defaults and auto-sets the VNC password so you can connect without a password prompt.
+## Start a container
 
 ```bash
-exegol [name] [--port PORT] [--vpn FILE] [--log] [--privileged]
+exegol-up [name] [--port PORT] [--vpn FILE] [--log] [--privileged]
 ```
 
-### Arguments
+`exegol-up` is a zsh alias for `~/docker/exegol-start.sh`.
 
-| Argument | Default | Description |
+| Option | Default | Effect |
 |---|---|---|
-| `name` | `exegol-htb` | Container name (actual container is `exegol-<name>`) |
-| `--port PORT` | `45377` | noVNC web port |
-| `--vpn FILE` | — | OpenVPN config file to pass to the CLI |
-| `--log` | — | Enable Exegol logging |
-| `--privileged` | — | Run with full privileges (use if tools fail) |
+| `name` | `htb` | The container is named `exegol-<name>` |
+| `--port` | `45377` | noVNC port |
+| `--vpn FILE` | none | OpenVPN or WireGuard config started inside the container (Exegol `--vpn`) |
+| `--log` | off | Shell logging to `/workspace/logs/` |
+| `--privileged` | off | Full privileges. Use it only if a tool needs it. |
 
-### VNC Password
+On first creation, the script does the following:
 
-On first start, the wrapper background-sets `root:exegol` via `docker exec`. When the desktop is ready you'll see:
+1. It adds a UFW rule `allow in on tailscale0` for the port, with comment `exegol-novnc-exegol-<name>`. The rule is never removed automatically.
+2. It runs `exegol start <name> free --workspace ~/docker/exegol-workspace/<name> --desktop --desktop-config http:0.0.0.0:<port>` with Exegol's default host networking. The desktop listens on all interfaces, and UFW limits it to `tailscale0`. `security-check.sh` reports it as an expected warning.
+3. Once the container exists, it sets a random password for `root` and prints it once:
 
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Desktop ready!
-   URL:      http://exegol.internal:PORT/vnc.html
-   User:     root  |  Password: exegol
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
+   ```
+   Desktop: http://exegol.internal:45377/vnc.html  user: root  password: ...
+   ```
 
-### Resume Behaviour
+Options apply only when the container is created. If `exegol-<name>` already exists, the script just runs `exegol start <name>`. The password set at creation stays valid.
 
-If the container `exegol-<name>` already exists, the script calls `exegol start <name>` to resume it (the official CLI restarts it and re-attaches the desktop).
+Run several containers side by side by giving each its own name and port, for example `exegol-up osint --port 45378`.
 
-## Running Multiple Containers
-
-Each container needs a **unique noVNC port**.
-
-### Port Allocation Convention
-
-| Port  | Use Case | Command |
-|-------|----------|---------|
-| 45377 | HTB exploitation (default) | `exegol` |
-| 45378 | OSINT / reconnaissance | `exegol osint --port 45378` |
-| 45379 | Dev / tool testing | `exegol dev --port 45379` |
-| 45380+ | Additional containers | `exegol box2 --port 45380` |
-
-### Why Multiple Containers?
-
-- **Isolation**: Keep HTB exploitation separate from OSINT work
-- **Persistence**: Each container keeps its own shell history and tool state
-- **Parallel work**: Work on multiple boxes or tasks simultaneously
-- **Clean separation**: Different tools/configs per engagement
-
-## Use Cases
-
-### HTB Exploitation (Default)
+## Manage containers
 
 ```bash
-# Connect VPN and start default container
-htb-vpn ~/htb/starting-point.ovpn
-exegol
-
-# Access at http://exegol.internal:45377/vnc.html  (root / exegol)
-# Attach a terminal alongside the desktop:
-docker exec -it exegol-exegol-htb zsh
+exegol info                          # list containers and images (alias: exegol-list)
+exegol start htb                     # start if needed and open a shell
+exegol stop htb
+exegol remove htb
+exegol-reset exegol-htb              # new root/noVNC password (~/docker/exegol-reset-vnc.sh)
 ```
 
-### OSINT Investigation
+After removing a container, delete its firewall rule:
 
 ```bash
-exegol osint-work --port 45378
-
-# Access at http://exegol.internal:45378/vnc.html
-# Tools: maltego, spiderfoot, recon-ng, theHarvester
+sudo ufw status | grep exegol-novnc
+sudo ufw delete allow in on tailscale0 to any port 45377 proto tcp
 ```
 
-### Dev / Tool Testing
+## Workspace and backups
+
+`exegol-up` creates each container with `/workspace` mapped to `~/docker/exegol-workspace/<name>` on the host. `backup.sh` archives that directory, so your engagement files are part of every backup. A container always keeps the workspace it was created with. Containers created with the plain `exegol` CLI use Exegol's default, `~/.exegol/workspaces/<container>`, which is not backed up.
+
+## HTB / THM VPN on the host
+
+`htb-vpn` (`~/docker/htb-vpn.sh`) runs OpenVPN on the host. All host-network containers, Exegol included, share the resulting `tun0`.
 
 ```bash
-exegol dev-test --port 45379
-
-# Access at http://exegol.internal:45379/vnc.html
+htb-vpn                           # start with ~/htb/lab.ovpn
+htb-vpn ~/htb/other.ovpn          # start with another file (or: htb-vpn start ~/htb/other.ovpn)
+htb-vpn status
+htb-vpn stop
 ```
 
-### Multiple HTB Boxes Side-by-Side
+- Starting the VPN replaces a tunnel that is already running. The script tightens the `.ovpn` file to mode 0600, starts `sudo openvpn --daemon`, and waits up to 10 s for `tun0`.
+- The PID file and log are in `/run/devbox/` (`htb-vpn.pid`, `htb-vpn.log`), which is recreated at boot. Stopping runs `sudo pkill -F /run/devbox/htb-vpn.pid openvpn`, which signals only the process in that file, and only if it is openvpn.
+- Both `sudo openvpn` and that `pkill` are passwordless sudoers entries, so the helper never asks for a password.
 
-```bash
-exegol htb-box1 --port 45377
-exegol htb-box2 --port 45378
-
-# Two browser tabs, two separate environments
-# Both share the host VPN (tun0)
-```
-
-## Common Workflows
-
-### Start, Work, Stop
-
-```bash
-# Start (creates container + desktop)
-exegol my-box --port 45378
-
-# Work in browser at http://exegol.internal:45378/vnc.html
-
-# Stop when done
-exegol stop my-box
-
-# Remove container entirely
-exegol rm my-box
-```
-
-### Resume a Stopped Container
-
-```bash
-# Re-enter existing container (wrapper detects it exists)
-exegol my-box --port 45378
-```
-
-### Attach Terminal to Running Container
-
-```bash
-# Open a shell in a running container
-docker exec -it exegol-my-box zsh
-```
-
-### List All Containers
-
-```bash
-exegol-list    # alias for: exegol info
-```
+For a VPN that only one container uses, pass `--vpn` to `exegol-up` when you create it instead.
 
 ## Troubleshooting
 
-### Desktop Not Accessible
-
-1. Check the container is running: `exegol info`
-2. Verify the container name: Exegol CLI names containers `exegol-<name>`
-3. Check port availability: `ss -tlnp | grep 45377`
-4. Try stopping and restarting: `exegol stop my-box && exegol my-box`
-
-### VNC Password Prompt
-
-The wrapper auto-sets `root:exegol` in a background job. If you see a password prompt, the background job may not have run yet (container took >60s to start). Set it manually:
-
-```bash
-docker exec exegol-my-box bash -c "echo 'root:exegol' | chpasswd"
-```
-
-### Port Already in Use
-
-```
-Error: Port 45378 is already in use
-```
-
-Use a different port or find what's using it:
-
-```bash
-ss -tlnp | grep 45378
-exegol my-box --port 45380
-```
-
-### VPN Not Working in Container
-
-- Exegol uses `--network host` and inherits the host's tun0 interface
-- Check VPN on host: `htb-vpn status`
-- Check routing: `ip route show dev tun0`
-- All containers share the same VPN connection
-
-### Container Won't Start
-
-```bash
-# Check for name conflicts
-exegol info
-
-# Remove stale container and retry
-exegol rm my-box
-exegol my-box --port 45378
-```
-
----
-
-*See also: [README — Penetration testing workflow](../README.md#penetration-testing-workflow)*
+| Symptom | Check | Fix |
+|---|---|---|
+| Desktop page times out | `sudo ufw status \| grep <port>`, `ss -ltn \| grep <port>` | Add the UFW rule shown above, or start the container |
+| `tailscale0 not found` | `tailscale status` | `sudo tailscale up` |
+| Password never printed | The container took longer than 2 minutes to appear | `exegol-reset exegol-<name>` |
+| Port already in use | `ss -ltnp \| grep <port>` | Pick another `--port` |
+| `No tun0 after 10s` | `sudo tail /run/devbox/htb-vpn.log` | Fix the `.ovpn` file or the credentials. Check that the lab isn't expired. |
+| `/run/devbox missing` | `ls /etc/tmpfiles.d/devbox.conf` | Re-run `sudo ./setup.sh` |
+| Targets unreachable from Exegol | `ip route get 10.10.10.1` on the host | Start the VPN. Containers created with Exegol `--network` other than host don't see the host's `tun0`. |

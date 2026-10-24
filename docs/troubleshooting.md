@@ -1,505 +1,129 @@
-# Troubleshooting Guide
+# Troubleshooting
 
-Solutions for common DevBox issues.
+Each entry gives a symptom, what to check, and the fix. Re-running `sudo ./setup.sh` is safe and fixes most drift. If you need help, attach the output of `~/docker/diagnose.sh` (see [ops.md](ops.md#diagnostics-bundle)).
 
-## Table of Contents
+Topic-specific pages: [HTTPS](https-setup.md#troubleshooting), [Exegol and VPN](exegol.md#troubleshooting), [IDE clients](remote-ide-setup.md#troubleshooting), [security-check results](security.md#checking-it-security-checksh).
 
-- [SSH Issues](#ssh-issues)
-- [Service Issues](#service-issues)
-- [Tailscale Issues](#tailscale-issues)
-- [Ollama Issues](#ollama-issues)
-- [Docker Issues](#docker-issues)
-- [VPN Issues](#vpn-issues)
-- [Performance Issues](#performance-issues)
+## Setup
 
-## SSH Issues
+### setup.sh refuses to start
 
-### Connection Refused
+Preflight runs before any change and lists every problem at once, as `[xx]` lines. Fix them all and run it again. To rerun only the checks, use `./setup.sh --dry-run`, which needs no root. Common causes:
 
-**Symptoms**: `ssh: connect to host ... port 5522: Connection refused`
+- **No SSH public key.** Pass `SSH_PUBLIC_KEY="ssh-ed25519 ..."`, write the key to `~/.ssh/devbox_authorized_key` (root's when you use sudo), or make sure the operator already has a non-empty `authorized_keys`. Password login is disabled at the end of setup, so a key is mandatory.
+- **Docker missing or no Compose v2.** Install Docker Engine together with its Compose plugin (`docker-ce` + `docker-compose-plugin`, or Ubuntu's `docker.io` + `docker-compose-v2`).
+- **`--yes needs Tailscale up already...`.** With `--yes` there's nobody to open a login URL. Run `sudo tailscale up` first, or pass `TAILSCALE_AUTHKEY`.
+- **HTTPS settings incomplete.** See [https-setup.md](https-setup.md).
+- **`DEVBOX_GPU=nvidia but Docker has no nvidia runtime`.** See [GPU](ollama-optimization.md#gpu).
+- **`Refusing to install into ~/docker: not a devbox tree`.** The directory holds files DevBox didn't create. Move the listed entries elsewhere.
 
-**Diagnosis**:
+### "Another setup.sh is running"
 
-```bash
-# On server (via console or recovery)
-sudo systemctl status ssh
-sudo ss -tlnp | grep ssh
-```
+Another setup.sh process holds the lock on `/run/devbox-setup.lock`. The lock is released when that process exits, so a leftover file is harmless; don't delete it. Find the holder with `sudo fuser -v /run/devbox-setup.lock`.
 
-**Solutions**:
+### "Completed with failures: ..."
 
-1. Verify SSH is running:
-   ```bash
-   sudo systemctl start ssh
-   sudo systemctl enable ssh
-   ```
+Some steps are non-critical: `mise install`, Oh My Zsh, LazyVim and fail2ban. When one of them fails, setup.sh applies everything else, then exits 1 and names what failed. Fix the cause and re-run setup.
 
-2. Check correct port:
-   ```bash
-   grep "^Port" /etc/ssh/sshd_config
-   # Should show: Port 5522
-   ```
+- **mise install** usually fails because of the GitHub API rate limit. Run `sudo MISE_GITHUB_TOKEN=<token> ./setup.sh`; a read-only token is enough. You can also run `mise install` as the operator.
+- **fail2ban:** read `journalctl -u fail2ban -n 50`.
 
-3. Verify firewall:
-   ```bash
-   sudo ufw status
-   sudo ufw allow 5522/tcp
-   ```
+## SSH
 
-### Permission Denied (publickey)
+### Can't log in after setup
 
-**Symptoms**: `Permission denied (publickey)`
+setup.sh confirms sshd is listening on the configured port before it changes UFW. If any step fails, it restores the previous sshd configuration. So the usual causes are outside the host:
 
-**Solutions**:
+- **Your provider's firewall or security group** doesn't allow the new port (default 5522). Open it.
+- **Wrong command.** Use `ssh -p 5522 dev@<server>`. Root login is disabled.
+- **Wrong key offered.** Debug with `ssh -v -i ~/.ssh/<key> -p 5522 dev@<server>`.
 
-1. Verify your key is in authorized_keys:
-   ```bash
-   cat ~/.ssh/authorized_keys
-   ```
-
-2. Check permissions:
-   ```bash
-   chmod 700 ~/.ssh
-   chmod 600 ~/.ssh/authorized_keys
-   ```
-
-3. Verify correct key on client:
-   ```bash
-   ssh -i ~/.ssh/id_ed25519 -p 5522 dev@server
-   ```
-
-### Connection Timeout
-
-**Symptoms**: Connection hangs, no response
-
-**Solutions**:
-
-1. Verify server IP is correct
-2. Check if server is online (ping from another source)
-3. Verify port 5522 is open in cloud provider firewall
-
-## Service Issues
-
-### Services Not Accessible
-
-**Symptoms**: Cannot access ai.internal, traefik.internal, etc.
-
-**Diagnosis**:
+From the provider console or a session that's still open:
 
 ```bash
-# Check containers are running
-docker ps
-
-# Check Traefik logs
-docker logs traefik
-
-# Test internal routing
-curl -H "Host: ai.internal" http://localhost
+sudo sshd -T | grep -E '^(port|passwordauthentication|permitrootlogin) '
+sudo ss -ltnp | grep sshd
+sudo ufw status
+systemctl status ssh.socket ssh.service
 ```
 
-**Solutions**:
+Ubuntu 22.10 and later use socket activation, so after a port change, `sudo systemctl daemon-reload && sudo systemctl restart ssh.socket` applies it; setup.sh does this for you. If setup aborted with `Effective sshd config lacks ...`, the message names the file that overrides the DevBox drop-in. Remove the setting from that file and re-run setup.
 
-1. Verify containers are running:
-   ```bash
-   cd ~/docker
-   ./start-all.sh
-   ```
+## Network and access
 
-2. Check Traefik configuration:
-   ```bash
-   docker logs traefik 2>&1 | grep -i error
-   ```
+### Services bound to 127.0.0.1, or the wrong IP
 
-3. Verify DNS entries on client:
-   ```bash
-   cat /etc/hosts | grep internal
-   ```
+**Check:** `docker ps` shows `127.0.0.1:80->80/tcp`, or `grep TAILSCALE_IP ~/docker/traefik/.env` doesn't match `tailscale ip -4`.
 
-4. **Tailscale port binding**: Ports 80 and 443 are bound to the Tailscale IP — they are intentionally inaccessible from LAN or the public internet. You must connect via Tailscale to reach services. Verify:
-   ```bash
-   ss -tlnp | grep ':80\|:443'   # Should show TAILSCALE_IP, not 0.0.0.0
-   tailscale status               # Verify Tailscale is connected
-   ```
+**Cause:** the install used `DEVBOX_ALLOW_NO_TAILSCALE=true`, or the node was re-added to the tailnet and got a new IP.
 
-### Container Won't Start
+**Fix:** `sudo tailscale up`, then `sudo ./setup.sh`, then `~/docker/start-all.sh`.
 
-**Diagnosis**:
+### A client can't reach ai.internal
+
+1. Is the client on the tailnet? Check with `tailscale status` and `tailscale ping <server>`.
+2. Does the name resolve to the server's Tailscale IP? Check `/etc/hosts` (or DNS for the HTTPS names).
+3. On the server, `docker ps` must show Traefik on `<tailscale-ip>:80->80/tcp`.
+4. Do your tailnet ACLs allow ports 80 and 443 to the server?
+
+The HTTP status from `curl -sI http://ai.internal` narrows it down:
+
+- **Timeout:** network, ACL or DNS (steps 1-4).
+- **404:** no router matches the host name; check the spelling.
+- **403:** see below.
+- **502/504:** the backend container is down; see [unhealthy services](#a-service-is-unhealthy-or-restarting).
+
+### 403 Forbidden from Traefik
+
+The request's source address isn't in the allowlist (Tailscale ranges and loopback). This typically happens when traffic arrives through a subnet router or proxy that rewrites the source to a LAN address. Connect with the Tailscale client directly. The allowlist is defined in `services/traefik/dynamic/middlewares-allowlist.yml`. If you deliberately need another range, change it in the repo and re-run setup.
+
+### 401 Unauthorized on ollama.internal
+
+The client sends no credential, or an old one.
+
+- Read the current credential on the server: `cat ~/docker/.secrets/ollama-auth.txt`.
+- After `rotate-ollama-auth.sh`, update every client. Laptop helpers are refreshed by re-running `scripts/laptop/ollama-setup.sh`.
+- If even the current credential fails, check that `~/docker/traefik/dynamic/ollama-auth.yml` exists. Look for `middleware ... does not exist` in `docker logs traefik`, and re-run setup.
+
+## Containers
+
+### A service is unhealthy or restarting
 
 ```bash
-docker ps -a                    # Check status
-docker logs container-name      # Check logs
-docker inspect container-name   # Check configuration
+cd ~/docker/<service>             # traefik or ollama-openwebui
+docker compose ps
+docker compose logs --tail 100 <container>
+docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' <container>
 ```
 
-**Common causes**:
+- `start-all.sh` waits up to 180 s per service. A timeout means a health check never passed.
+- `TAILSCALE_IP unset`, `DEVBOX_GID unset` or `WEBUI_SECRET_KEY unset`: compose was run outside `~/docker/<service>`, or the `.env` file is missing or predates the current setup.sh. Run compose from the install directory, or re-run setup.
+- `network proxy-net ... could not be found`: run `~/docker/start-all.sh`, which creates it, or `docker network create proxy-net`.
+- Traefik reports `address already in use`: another process holds port 80 or 443. Find it with `sudo ss -ltnp 'sport = :80'`.
+- `OOMKilled true`: the container hit its memory limit. For Ollama, see the next entry.
 
-1. Port conflict: Another service using the same port
-2. Volume permissions: Check directory ownership
-3. Network issues: Verify network exists
-   ```bash
-   docker network ls | grep proxy-net
-   ```
+### Ollama fails to load a model, or is OOM-killed
 
-### Open WebUI Not Loading
+The model and its context cache don't fit in `OLLAMA_MEM_LIMIT` (8g by default). Raise the limit or use a smaller or more quantized model. See [ollama-optimization.md](ollama-optimization.md).
 
-**Symptoms**: 502 Bad Gateway or blank page
+### GPU not used
 
-**Solutions**:
+See [ollama-optimization.md](ollama-optimization.md#gpu).
 
-1. Check Open WebUI container:
-   ```bash
-   docker logs openwebui
-   ```
+### Disk full
 
-2. Verify Ollama is running:
-   ```bash
-   docker exec -it ollama ollama list
-   ```
+Check with `docker system df` and `df -h /var/lib/docker`. Models are the usual culprit: list them with `docker exec ollama ollama list` and remove one with `docker exec ollama ollama rm <model>`. `docker image prune -a` removes unused images. Never run `docker volume prune --all` while the stack is stopped. Named volumes with no container attached would be deleted, including Open WebUI data, certificates and models.
 
-3. Restart services:
-   ```bash
-   cd ~/docker/ollama-openwebui
-   docker compose down && docker compose up -d
-   ```
+## Backups and checks
 
-## Tailscale Issues
+### backup.sh warns "backup is NOT encrypted"
 
-### Authentication Failed
+No age recipients or GPG recipient is configured. See [ops.md](ops.md#encryption).
 
-**Symptoms**: Cannot complete Tailscale authentication
+### security-check.sh reports FAIL
 
-**Solutions**:
+Each check, what it means and its fix are listed in [security.md](security.md#checking-it-security-checksh).
 
-```bash
-sudo tailscale logout
-sudo tailscale up --accept-routes
-```
+### Commands missing in sudo or root shells
 
-Open the provided URL in your browser to re-authenticate.
-
-### Cannot Reach Other Devices
-
-**Diagnosis**:
-
-```bash
-tailscale status         # Check connection
-tailscale ping device    # Test connectivity
-```
-
-**Solutions**:
-
-1. Verify both devices are online in Tailscale admin
-2. Check ACLs in Tailscale admin console
-3. Restart Tailscale:
-   ```bash
-   sudo systemctl restart tailscaled
-   ```
-
-### MagicDNS Not Working
-
-**Symptoms**: Cannot resolve device names
-
-**Solutions**:
-
-1. Enable MagicDNS in Tailscale admin console
-2. Verify DNS settings:
-   ```bash
-   tailscale status --json | jq '.DNS'
-   ```
-
-## Ollama Issues
-
-### Models Not Loading
-
-**Diagnosis**:
-
-```bash
-docker exec -it ollama ollama list
-docker logs ollama
-```
-
-**Solutions**:
-
-1. Pull model again:
-   ```bash
-   docker exec -it ollama ollama pull model-name
-   ```
-
-2. Check disk space:
-   ```bash
-   df -h /var/lib/docker
-   ```
-
-3. Restart Ollama:
-   ```bash
-   docker restart ollama
-   ```
-
-### Out of Memory
-
-**Symptoms**: Model crashes or fails to load
-
-**Solutions**:
-
-1. Use smaller model:
-   ```bash
-   docker exec -it ollama ollama pull llama3.2:1b
-   ```
-
-2. Check memory usage:
-   ```bash
-   docker stats ollama
-   ```
-
-3. Increase container memory limit in docker-compose.yml
-
-### Slow Responses
-
-**Causes and solutions**:
-
-1. **No GPU**: Check if GPU is detected
-   ```bash
-   docker logs ollama 2>&1 | grep -i gpu
-   ```
-
-2. **Large model**: Use smaller model or quantized version
-
-3. **Insufficient RAM**: Close other applications, use smaller model
-
-4. **Suboptimal configuration**: See [Ollama Optimization](ollama-optimization.md) for tuning
-
-### Remote Access Not Working
-
-**Diagnosis**:
-
-```bash
-# From server
-curl http://localhost:11434/api/tags
-
-# From laptop
-curl http://TAILSCALE_IP:11434/api/tags
-```
-
-**Solutions**:
-
-1. Verify Ollama is bound to Tailscale IP (not localhost)
-2. Check docker-compose.yml ports configuration
-3. See [Remote IDE Setup](remote-ide-setup.md) for complete configuration
-4. See [Ollama Optimization](ollama-optimization.md) for port binding options
-
-## Docker Issues
-
-### Docker Daemon Not Running
-
-**Symptoms**: `Cannot connect to the Docker daemon`
-
-**Solutions**:
-
-```bash
-sudo systemctl start docker
-sudo systemctl enable docker
-```
-
-### Permission Denied
-
-**Symptoms**: `permission denied while trying to connect to the Docker daemon`
-
-**Solutions**:
-
-```bash
-sudo usermod -aG docker $USER
-# Log out and back in, or:
-newgrp docker
-```
-
-### Disk Full
-
-**Diagnosis**:
-
-```bash
-df -h
-docker system df
-```
-
-**Solutions**:
-
-```bash
-# Remove unused resources
-docker system prune -af
-
-# Remove unused volumes
-docker volume prune -f
-
-# Remove old images
-docker image prune -af
-```
-
-### Network Issues
-
-**Symptoms**: Containers cannot communicate
-
-**Solutions**:
-
-1. Verify network exists:
-   ```bash
-   docker network ls | grep proxy-net
-   ```
-
-2. Recreate network if needed:
-   ```bash
-   docker network create proxy-net
-   ```
-
-3. Reconnect containers:
-   ```bash
-   cd ~/docker
-   ./stop-all.sh && ./start-all.sh
-   ```
-
-## VPN Issues
-
-### HTB VPN Not Connecting
-
-**Diagnosis**:
-
-```bash
-htb-vpn status
-tail -f /tmp/htb-vpn.log
-```
-
-**Solutions**:
-
-1. Verify OVPN file is valid
-2. Check file permissions:
-   ```bash
-   chmod 600 ~/htb/*.ovpn
-   ```
-
-3. Kill existing connection:
-   ```bash
-   htb-vpn stop
-   htb-vpn ~/htb/lab.ovpn
-   ```
-
-### No Route to HTB Network
-
-**Diagnosis**:
-
-```bash
-ip addr show tun0
-ip route | grep tun0
-```
-
-**Solutions**:
-
-1. Verify VPN is connected:
-   ```bash
-   htb-vpn status
-   ```
-
-2. Check routing:
-   ```bash
-   ip route get 10.10.10.1
-   ```
-
-### Exegol Cannot Reach Targets
-
-**Solutions**:
-
-1. Launch Exegol with host network:
-   ```bash
-   ./docker/exegol-start.sh
-   ```
-
-2. Verify from inside Exegol:
-   ```bash
-   ip addr
-   ping 10.10.10.x
-   ```
-
-## Performance Issues
-
-### High CPU Usage
-
-**Diagnosis**:
-
-```bash
-docker stats
-htop
-```
-
-**Solutions**:
-
-1. Identify heavy container:
-   ```bash
-   docker stats --no-stream
-   ```
-
-2. Restart problematic service:
-   ```bash
-   docker restart container-name
-   ```
-
-3. Check for runaway processes:
-   ```bash
-   docker exec container-name top
-   ```
-
-### High Memory Usage
-
-**Diagnosis**:
-
-```bash
-free -h
-docker stats
-```
-
-**Solutions**:
-
-1. Use smaller Ollama models
-2. Reduce container memory limits
-3. Stop unused services:
-   ```bash
-   docker stop container-name
-   ```
-
-### Slow Disk I/O
-
-**Diagnosis**:
-
-```bash
-iostat -x 1
-df -h
-```
-
-**Solutions**:
-
-1. Check disk usage and clean up
-2. Move Docker data to faster storage
-3. Use SSD for Ollama models
-
-## Getting Help
-
-If issues persist:
-
-1. Check container logs:
-   ```bash
-   docker logs container-name 2>&1 | tail -100
-   ```
-
-2. Run security check:
-   ```bash
-   cd ~/docker
-   ./security-check.sh
-   ```
-
-3. Collect system info:
-   ```bash
-   uname -a
-   docker version
-   tailscale version
-   ```
-
----
-
-*Last updated: 2026-05-16 (v1.0.0)*
+mise activates only in the operator's login shells. It's deliberately skipped under sudo, so tools such as `exegol`, `nvim` and `lazygit` aren't on root's `PATH`. Run them as the operator.

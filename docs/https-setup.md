@@ -1,135 +1,94 @@
-# Tailscale-only HTTPS via OVH DNS-01
+# HTTPS with Let's Encrypt (OVH DNS-01)
 
-DevBox supports opt-in HTTPS using Let's Encrypt wildcard certificates issued via the OVH DNS-01 ACME challenge. The TLS listener is **bound to the Tailscale IP** — there is no public `0.0.0.0:443` exposure. The certificate is publicly issued (anyone can fetch the cert chain), but the listener is reachable only through Tailscale.
+HTTPS mode is optional. It serves `https://ai.<domain>` and `https://ollama.<domain>` with Let's Encrypt certificates. Traefik obtains them through the DNS-01 challenge against an OVH-hosted DNS zone, so the server never has to be reachable from the internet. Port 443 is bound to the Tailscale IP, just like port 80. The `.internal` HTTP names keep working, and the Traefik dashboard stays at `http://traefik.internal`.
 
-This document covers the OVH-side setup. The integrated install flow is documented in [docs/updating.md](updating.md) and the [Quick start](../README.md#quick-start) section of `README.md`.
+What changes when `ENABLE_HTTPS=true`:
 
-## What HTTPS mode actually does
+- `~/docker/traefik/traefik.yml` is rendered from `services/traefik/traefik.https.yml.template`. It adds the `websecure` entrypoint with HSTS, and the `letsencrypt` resolver, which uses OVH DNS-01 and stores certificates in `acme.json` on the named volume `traefik_letsencrypt`.
+- `COMPOSE_FILE` in each service `.env` gains `docker-compose.https.yml`. That adds port 443 on the Tailscale IP and the TLS routers for `ai.<domain>` and `ollama.<domain>`. The Ollama router keeps its basic auth.
+- The OVH credentials are copied to `~/.config/devbox/ovh.env` and rendered to `~/docker/traefik/ovh.env`, both mode 0600.
 
-When `ENABLE_HTTPS=true`:
+Traefik requests one certificate per host name.
 
-- `setup.sh` reads `~/.config/devbox/ovh.env` (must exist, mode 0600) — refuses to proceed if absent.
-- Renders `services/traefik/traefik.https.yml.template` into `~/docker/traefik/traefik.yml`, replacing the HTTP-only static config.
-- Creates `~/docker/traefik/letsencrypt/acme.json` (mode 0600).
-- Renders `~/docker/traefik/.env` from `services/traefik/.env.template` with the four OVH credentials.
-- Emits per-service `COMPOSE_FILE_<SVC>=docker-compose.yml:docker-compose.https.yml:docker-compose.lock.yml` into `~/.config/devbox/config.env` so helpers chain the HTTPS overlay automatically.
-- The HTTPS overlay binds Traefik to `${TAILSCALE_IP}:443`. **No public bind.**
+## 1. Create an OVH API token
 
-## Step 1 — Create OVH API credentials
+The domain's DNS zone must be hosted at OVH. Create a token at <https://api.ovh.com/createToken/> (use the matching regional portal if you're outside the EU) with these rights:
 
-1. Open <https://api.ovh.com/createToken/>.
-2. Sign in.
-3. Fill in:
-   - **Application name**: `devbox-traefik-letsencrypt`
-   - **Description**: `Traefik DNS-01 challenge for Let's Encrypt`
-   - **Validity**: `Unlimited` (or set per your security policy)
-   - **Rights**:
-     ```
-     GET    /domain/zone/*
-     POST   /domain/zone/*
-     DELETE /domain/zone/*
-     ```
-4. Click **Create keys**.
-5. Save all three values — OVH only shows them once.
+```
+GET    /domain/zone/*
+POST   /domain/zone/*
+PUT    /domain/zone/*
+DELETE /domain/zone/*
+```
 
-## Step 2 — Place credentials at the expected path
+OVH shows the application key, application secret and consumer key only once.
 
-```bash
-install -d -m 0700 ~/.config/devbox
-cat > ~/.config/devbox/ovh.env <<EOF
+## 2. Write ovh.env
+
+```
 OVH_ENDPOINT=ovh-eu
-OVH_APPLICATION_KEY=your-application-key
-OVH_APPLICATION_SECRET=your-application-secret
-OVH_CONSUMER_KEY=your-consumer-key
-EOF
-chmod 600 ~/.config/devbox/ovh.env
+OVH_APPLICATION_KEY=...
+OVH_APPLICATION_SECRET=...
+OVH_CONSUMER_KEY=...
 ```
 
-Endpoint values: `ovh-eu` (Europe), `ovh-ca` (Canada), `ovh-us` (United States).
+Valid endpoints include `ovh-eu`, `ovh-ca` and `ovh-us`. setup.sh looks for the file in this order:
 
-## Step 3 — Set HTTPS env vars and run setup
+1. The path in `DEVBOX_OVH_ENV`.
+2. The operator's `~/.config/devbox/ovh.env`, for example `/home/dev/.config/devbox/ovh.env`.
+3. `~/.config/devbox/ovh.env` of the user running setup.sh. Under sudo that's root's, which is useful on a first install, before the operator user exists.
+
+Keep the file at mode 0600. setup.sh parses it without sourcing it.
+
+## 3. Run setup
 
 ```bash
-export ENABLE_HTTPS=true
-export DEVBOX_DOMAIN=yourdomain.com
-export DEVBOX_EMAIL=you@yourdomain.com   # for Let's Encrypt registration
-
-# Optional preview without mutation:
-./setup.sh --dry-run
-
-# Apply:
-sudo ./setup.sh
+sudo ENABLE_HTTPS=true DEVBOX_DOMAIN=example.org DEVBOX_EMAIL=you@example.org ./setup.sh
+~/docker/start-all.sh
 ```
 
-`setup.sh` halts with a clear error if `ENABLE_HTTPS=true` and `~/.config/devbox/ovh.env` is missing.
+Preflight fails, before any host change, if the domain, the email or any of the four OVH keys is missing. These settings are saved in `~/.config/devbox/config.env`, so later runs don't need the variables again.
 
-## Step 4 — DNS
+## 4. Name resolution on clients
 
-Add an `A` (or `AAAA`) record for the FQDNs Traefik will serve. The cert is wildcard-eligible via DNS-01, so a single record per published host is fine:
+Clients must resolve the names to the server's Tailscale IP (`tailscale ip -4` on the server). Choose one of:
 
-```
-A    ai.yourdomain.com           →  <Tailscale IP of devbox host>
-A    ollama.yourdomain.com       →  <Tailscale IP of devbox host>
-```
+- **Public DNS:** add a record `*.example.org` (or `ai` and `ollama`) of type `A`, pointing to the Tailscale IP. Every tailnet device then resolves the names with no extra setup. Off the tailnet the IP is unreachable, but the record does reveal the Tailscale address.
+- **Tailscale split DNS:** point the domain at a resolver you control.
+- **Hosts file:** add `100.x.y.z  ai.example.org ollama.example.org` to `/etc/hosts` on each client.
 
-Your own devices still resolve via `/etc/hosts` to the Tailscale IP for the `.internal` names; the public `*.yourdomain.com` records exist so Traefik's DNS-01 challenge can answer the wildcard request and so cosign-validating clients see the published name.
-
-## Step 5 — Verify cert issuance
-
-After `start-all.sh`:
+## 5. Verify
 
 ```bash
-docker logs traefik 2>&1 | grep -iE 'acme|letsencrypt|certificate'
+docker logs traefik 2>&1 | grep -iE 'acme|certificate|error'    # look for error lines
+curl -sv -o /dev/null https://ai.example.org 2>&1 | grep -E 'subject:|issuer:'
 ```
 
-Expect:
+The issuer should be Let's Encrypt. The first certificate usually takes a minute or two, because Traefik waits for the TXT record to propagate. Renewal is automatic. The `traefik_letsencrypt` volume survives setup re-runs and is included in backups, so restoring onto a new server doesn't request new certificates.
 
-```
-Obtaining ACME certificate(s)
-Certificate obtained successfully
+### Upgrading from an older install
+
+Older installs kept certificates in `~/docker/traefik/letsencrypt/acme.json`, on the host. They are not migrated to the volume, so after upgrading, Traefik requests new certificates on first start. Once `https://ai.<domain>` serves a valid certificate, delete the old directory: `rm -r ~/docker/traefik/letsencrypt`.
+
+## Switching back to HTTP
+
+```bash
+sudo ENABLE_HTTPS=false ./setup.sh
+~/docker/start-all.sh
 ```
 
-First issuance typically takes 30–90 seconds (DNS propagation). Subsequent renewals (60-day cycle) are silent.
+This restores the HTTP `traefik.yml`, removes `~/docker/traefik/ovh.env` and the HTTPS overlay, and keeps the `traefik_letsencrypt` volume and `~/.config/devbox/ovh.env`.
 
 ## Troubleshooting
 
-**Certificate not issued after 5 minutes**
+| Symptom | Check | Fix |
+|---|---|---|
+| Browser shows Traefik's default self-signed certificate | `docker logs traefik 2>&1 \| grep -i acme` | Read the ACME error and use the rows below |
+| ACME error `403` / `This call has not been granted` | The token rights | Create a token with all four methods on `/domain/zone/*` and update `~/.config/devbox/ovh.env`. Then run `sudo ./setup.sh` and `~/docker/start-all.sh`. |
+| ACME error `Invalid signature` / `Invalid credential` | Wrong key or endpoint | Fix `OVH_ENDPOINT` or the keys, then re-run as above |
+| Timeout waiting for propagation / `NXDOMAIN` | `dig +short NS example.org` must list OVH name servers | The zone isn't served by OVH; delegate it or use another domain |
+| `too many certificates` (rate limit) | Whether the `traefik_letsencrypt` volume was deleted or recreated | Wait for the Let's Encrypt limit to reset. Don't remove the volume. |
+| Name resolves but the connection times out | The client isn't on the tailnet, or the record points to a public IP | The record must point to the Tailscale IP |
+| `docker compose` errors with `DOMAIN unset` | `grep DOMAIN ~/docker/ollama-openwebui/.env` | Re-run setup with `DEVBOX_DOMAIN` |
 
-- `dig TXT _acme-challenge.yourdomain.com` — the TXT record must propagate.
-- `docker logs traefik 2>&1 | grep -i error` — common errors:
-  - `401 Unauthorized` — OVH credentials wrong; recheck App Key + Consumer Key.
-  - `NXDOMAIN` — wrong endpoint region or zone not delegated to OVH.
-
-**Permission errors on `acme.json`**
-
-```bash
-sudo chmod 600 ~/docker/traefik/letsencrypt/acme.json
-docker compose -f ~/docker/traefik/docker-compose.yml -f ~/docker/traefik/docker-compose.https.yml restart traefik
-```
-
-**Routing the `https` URLs from your laptop**
-
-Add the FQDNs to `/etc/hosts` on the laptop, mapped to the **Tailscale IP** (not the public IP):
-
-```
-100.X.Y.Z  ai.yourdomain.com  ollama.yourdomain.com
-```
-
-Or use Tailscale MagicDNS + a Tailscale-side split-DNS rule.
-
-## Going fully public (NOT recommended)
-
-If you want Traefik bound to `0.0.0.0:443` instead of the Tailscale IP, you must:
-
-1. Edit `services/traefik/docker-compose.https.yml` to change the bind from `${TAILSCALE_IP}:443:443` to `0.0.0.0:443:443`.
-2. Open the port in UFW: `sudo ufw allow 443/tcp`.
-3. Disable Open WebUI signup, ensure ollama-auth credential is rotated, and run `~/docker/security-check.sh`.
-
-This breaks the Tailscale-only assumption documented elsewhere (`README.md`, `ARCHITECTURE.md`). Prefer Tailscale ACLs over public exposure.
-
-## See also
-
-- [README.md — Quick start](../README.md#quick-start)
-- [docs/updating.md — Install from a signed release tarball](updating.md#install-from-a-signed-release-tarball)
-- [docs/security.md — Trust model](security.md)
-- [ARCHITECTURE.md — HTTPS via Compose Override](../ARCHITECTURE.md)
+Never bind 443 to `0.0.0.0`. `security-check.sh` fails it, and it bypasses UFW ([security.md](security.md#network-exposure)).

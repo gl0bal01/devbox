@@ -1,256 +1,70 @@
 # Contributing to DevBox
 
-Thank you for your interest in contributing to DevBox. This document provides guidelines for contributing to the project.
+DevBox is Bash, Docker Compose YAML, templates and Bats tests. This guide covers the local setup, the checks every change must pass, and the project conventions. The design decisions are in [ARCHITECTURE.md](ARCHITECTURE.md). Read the relevant entry before you change install layout, networking, HTTPS, pinning, downloads, backups, systemd or CI.
 
-## Table of Contents
+## Development setup
 
-- [Code of Conduct](#code-of-conduct)
-- [How to Contribute](#how-to-contribute)
-- [Development Setup](#development-setup)
-- [Coding Standards](#coding-standards)
-- [Commit Guidelines](#commit-guidelines)
-- [Pull Request Process](#pull-request-process)
-- [Testing](#testing)
-- [Documentation](#documentation)
-
-## Code of Conduct
-
-- Be respectful and inclusive
-- Focus on constructive feedback
-- Help maintain a welcoming environment for all contributors
-
-## How to Contribute
-
-### Reporting Issues
-
-Before creating an issue:
-
-1. Search existing issues to avoid duplicates
-2. Use the issue templates if available
-3. Include relevant details:
-   - Operating system and version
-   - Docker version
-   - Steps to reproduce
-   - Expected vs actual behavior
-   - Error messages and logs
-
-### Suggesting Features
-
-1. Open an issue with the "feature request" label
-2. Describe the use case and benefits
-3. Consider implementation complexity
-
-### Submitting Changes
-
-1. Fork the repository
-2. Create a feature branch from `main`
-3. Make your changes
-4. Test your changes
-5. Submit a pull request
-
-## Development Setup
-
-### Prerequisites
-
-- Ubuntu 24.04 (or compatible Linux distribution)
-- Docker and Docker Compose
-- Git
-- Bash 5.0 or later
-
-### Local Development
+On Ubuntu or Debian:
 
 ```bash
-# Clone your fork
-git clone https://github.com/gl0bal01/devbox.git
-cd devbox
-
-# Create a feature branch
-git checkout -b feature/your-feature-name
-
-# Make changes and test
-./setup.sh  # Test on a development VPS
+sudo apt-get install -y bats shellcheck jq gnupg openssl gettext-base systemd
+# plus Docker Engine with the Compose v2 plugin, and your user in the docker group
+git clone https://github.com/gl0bal01/devbox.git && cd devbox
+make hooks        # pre-push runs the full local CI mirror
 ```
 
-### Testing Environment
+What each tool is for:
 
-For testing, use a fresh VPS instance:
+- **`bats`**: runs the test suites.
+- **`shellcheck`**: runs inside `scripts/ci/lint.sh`.
+- **Docker CLI**: `tests/contract/contract.bats` and `scripts/ci/check-compose-config.sh` resolve the compose files with `docker compose config`.
+- **`systemd-analyze`**: `tests/contract/systemd.bats` verifies the unit templates with it.
+- **gpg, openssl, envsubst**: exercised by `tests/unit/devbox-lib.bats`.
 
-- Hostinger, Hetzner, DigitalOcean, or similar
-- Ubuntu 24.04 with Docker pre-installed
-- Minimum 4GB RAM
+## Checks
 
-## Coding Standards
+| Command | What it runs | When |
+|---|---|---|
+| `make test` | lint, docs path check, bats, compose chains | While you work. Offline, takes seconds. |
+| `make ci-fast` | the CI `static` job via `scripts/ci/local.sh --fast`, with a summary and log paths | Before you commit |
+| `make ci` | both CI jobs, including the real install in a throwaway systemd container (`scripts/ci/e2e-container.sh`) | Before you push. The pre-push hook runs it. |
 
-### Shell Scripts
+The e2e install needs about 15 GB of free disk and a privileged container. `CI_FAST=1 git push` skips it locally; CI always runs it. Never run `scripts/ci/e2e.sh` directly on a machine you care about: it creates users, moves sshd and enables UFW.
 
-Follow these conventions for shell scripts:
+`.github/workflows/pr-validate.yml` and `scripts/ci/local.sh` must stay identical in steps and order. If you add a CI step, add it to both in the same commit.
 
-1. **Shebang**: Use `#!/usr/bin/env bash`
-2. **Error handling**: Use `set -euo pipefail`
-3. **Quoting**: Always quote variables: `"$variable"`
-4. **Functions**: Use lowercase with underscores: `my_function()`
-5. **Constants**: Use uppercase: `MY_CONSTANT`
+## Making changes
 
-**Example**:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-MY_CONSTANT="value"
-
-my_function() {
-    local input="$1"
-    echo "Processing: $input"
-}
-
-main() {
-    my_function "$MY_CONSTANT"
-}
-
-main "$@"
-```
-
-### Documentation
-
-1. Use Markdown for all documentation
-2. Follow the structure in existing docs
-3. Use clear, simple language
-4. Include code examples where helpful
-5. Avoid jargon and idioms
-
-### Docker Compose Files
-
-1. Use version 3.8 or later syntax
-2. Include health checks for all services
-3. Apply security hardening (no-new-privileges, cap_drop)
-4. Use resource limits
-5. Document with comments
-
-## Commit Guidelines
-
-### Commit Message Format
-
-```
-type: short description
-
-Longer description if needed.
-
-- Detail 1
-- Detail 2
-```
-
-### Commit Types
-
-| Type | Description |
-|------|-------------|
-| feat | New feature |
-| fix | Bug fix |
-| docs | Documentation changes |
-| style | Formatting, no code change |
-| refactor | Code restructuring |
-| test | Adding tests |
-| chore | Maintenance tasks |
-
-### Examples
-
-```
-feat: add GPU detection for Ollama
-
-Automatically detects NVIDIA GPUs and configures
-Ollama to use GPU acceleration.
-
-- Added nvidia-smi check
-- Updated docker-compose for GPU passthrough
-```
-
-```
-fix: correct SSH port in firewall rules
-
-UFW rules were using port 22 instead of configured
-SSH_PORT variable.
-```
-
-```
-docs: add troubleshooting section for VPN issues
-```
-
-## Pull Request Process
-
-### Before Submitting
-
-1. Test your changes on a fresh VPS
-2. Update documentation if needed
-3. Ensure no sensitive data is included (IPs, keys, passwords)
-4. Run shellcheck on shell scripts:
-   ```bash
-   shellcheck setup.sh
-   ```
-
-### Pull Request Template
-
-When creating a pull request, include:
-
-1. **Description**: What does this change do?
-2. **Motivation**: Why is this change needed?
-3. **Testing**: How was this tested?
-4. **Checklist**:
-   - [ ] Tested on fresh Ubuntu 24.04 VPS
-   - [ ] Documentation updated
-   - [ ] No hardcoded secrets or IPs
-   - [ ] Shell scripts pass shellcheck
-
-### Review Process
-
-1. Maintainers will review within 1-2 weeks
-2. Address feedback promptly
-3. Keep discussions focused and constructive
-
-## Testing
-
-### Manual Testing Checklist
-
-Test these scenarios before submitting:
-
-1. **Fresh installation**: Run setup.sh on new VPS
-2. **Idempotency**: Run setup.sh twice, verify no errors
-3. **Services**: Verify all services start and are accessible
-4. **Security**: Run security-check.sh
-5. **AI tools**: Test install-ai-dev-stack.sh
-
-### Security Testing
-
-Always verify:
-
-- No secrets in logs or output
-- Correct file permissions (600 for sensitive files)
-- Services only accessible via Tailscale
-- UFW rules correct
+- **Shell:** `#!/usr/bin/env bash`, `set -euo pipefail`, quote every expansion, `lower_snake` function names, `UPPER` constants, 4-space indents (2 for Bats and YAML, tabs in the Makefile). ShellCheck must be clean at warning level.
+- **Shared logic** goes in `scripts/lib/devbox-lib.sh`, with a test in `tests/unit/devbox-lib.bats`. Keep the functions free of host side effects and pass paths explicitly.
+- **Install layout, service names, hosts and backup scope** live only in `scripts/lib/devbox-contract.sh`. Bump `DEVBOX_CONTRACT_VERSION` on schema-incompatible changes.
+- **setup.sh** must stay re-runnable. Every check belongs in preflight, before the first host change. Operator-owned files (`.env`, credentials, `ovh.env`) are created once and never overwritten. Setup upserts only its own keys in `config.env`.
+- **Compose:** keep `no-new-privileges`, `cap_drop: ALL`, a memory limit and a healthcheck on every service. Only Traefik publishes ports, and only on `${TAILSCALE_IP:?}`. Adding a service is described in [services/README.md](services/README.md).
+- **Images:** edit the tag in the base compose file, then run `scripts/update-images.sh --apply`. Never edit a lock by hand.
+- **Downloads:** no `curl | sh`. Tools come from apt repositories with fingerprints pinned in `scripts/lib/pins.sh`, or from mise (`scripts/install/mise-config.toml`).
+- **Secrets:** never commit rendered `.env` files, keys, `*.ovpn`, `acme.json` or anything from `.secrets/`. Secret files are written with mode 0600.
 
 ## Documentation
 
-### Where to Document
+- `README.md` covers what DevBox does and how to use it. `ARCHITECTURE.md` covers why it works that way (Decision / Drivers / Rejected / Consequences). Do not duplicate content between them.
+- `scripts/ci/check-docs-tree.sh` fails when a doc references a `services/…`, `scripts/…`, `tests/…` or workflow path that does not exist. Renaming or deleting a file means updating every doc that mentions it.
+- Write plain, present-tense technical English. Leave out test counts, version banners and "last updated" lines.
 
-| Change Type | Documentation Location |
-|-------------|------------------------|
-| New feature | README.md, relevant docs/ file |
-| Configuration | README.md Configuration section |
-| Troubleshooting | docs/troubleshooting.md |
-| Commands | README.md (Operator commands) + Makefile `make help` |
+## Commits and pull requests
 
-### Documentation Standards
+Commit messages use `type: short description`, where type is one of `feat`, `fix`, `docs`, `refactor`, `test` or `chore`. Add a body when the reason for the change is not obvious.
 
-1. Use present tense ("Add feature" not "Added feature")
-2. Be concise and clear
-3. Include examples for complex features
-4. Update the "Last updated" date
+```
+fix: keep credentials stable across setup re-runs
 
-## Questions
+Re-rendering the htpasswd hash on every run broke the stored credential.
+Generate the credential once and derive the middleware from it.
+```
 
-For questions about contributing:
+Before you open a pull request:
 
-1. Check existing documentation
-2. Search closed issues
-3. Open a new issue with the "question" label
+- [ ] `make ci` passes (or `make ci-fast`, and say that you skipped the e2e install)
+- [ ] docs and `ARCHITECTURE.md` updated if behavior or a decision changed
+- [ ] no secrets, real IPs or hostnames in the diff
 
-Thank you for contributing to DevBox.
+When you report a bug, include the output of `~/docker/diagnose.sh` (it collects no secrets), the Ubuntu and Docker versions, and the steps to reproduce.
