@@ -1,190 +1,124 @@
 #!/usr/bin/env bash
-# Backup persistent devbox volumes (named volumes via docker run + tar) and
-# host paths into a single archive, optionally encrypted with GPG or age.
+# Back up devbox state into one archive under ~/.local/share/devbox/backups/.
 #
-# Output: ~/.local/share/devbox/backups/devbox-backup-<timestamp>.tar.gz[.gpg|.age]
+# Archive layout (tar):
+#   MANIFEST               created, contract version, volumes
+#   volumes/<volume>.tgz   every Compose volume of every service, except the
+#                          re-pullable ones in DEVBOX_BACKUP_EXCLUDE_VOLUMES
+#   files.tgz              DEVBOX_BACKUP_PATHS + each service .env, relative
+#                          to the owner's home
+#   ollama-models.txt      `ollama list`, to re-pull models after a restore
 #
-# Named volumes (declared in services/*/docker-compose.yml + listed in
-# devbox-contract.sh DEVBOX_VOLUMES_*) are exported with:
-#   docker run --rm -v <vol>:/data -v <staging>:/backup ${ALPINE_BACKUP_IMAGE} \
-#       tar -czf /backup/<vol>.tgz -C /data .
-# A `docker volume inspect` precheck skips missing volumes with a warn.
+# Containers using a volume are paused while it is archived, so databases
+# (Open WebUI's SQLite) are captured crash-consistent.
+#
+# Encryption (first match): age recipients in ~/.config/devbox/age-recipients.txt,
+# or BACKUP_GPG_RECIPIENT in config.env. Otherwise the archive is plaintext
+# (mode 0600) and a warning is printed. Keeps the newest DEVBOX_BACKUP_KEEP
+# archives (default 14). Restore with restore.sh.
 set -euo pipefail
+umask 077
 
-DEVBOX_HOME="${DEVBOX_HOME:-${HOME}/docker}"
-CONTRACT="${DEVBOX_HOME}/lib/devbox-contract.sh"
-if [ ! -f "${CONTRACT}" ]; then
-    echo "[ERROR] Missing ${CONTRACT}. Run setup.sh to install the runtime contract." >&2
-    exit 1
-fi
-# shellcheck disable=SC1090
-. "${CONTRACT}"
+export DEVBOX_HOME="${DEVBOX_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# shellcheck source=../lib/devbox-contract.sh
+. "${DEVBOX_HOME}/lib/devbox-contract.sh"
 
-BACKUP_DIR="${HOME}/.local/share/devbox/backups"
-TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-STAGING="${BACKUP_DIR}/staging-${TIMESTAMP}"
-ARCHIVE_BASE="${BACKUP_DIR}/devbox-backup-${TIMESTAMP}.tar.gz"
+KEEP="${DEVBOX_BACKUP_KEEP:-14}"
+[[ "${KEEP}" =~ ^[1-9][0-9]*$ ]] || { echo "DEVBOX_BACKUP_KEEP must be >= 1" >&2; exit 2; }
+docker info >/dev/null || { echo "Docker is not reachable: nothing backed up." >&2; exit 1; }
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+ARCHIVE="${DEVBOX_BACKUP_DIR}/devbox-backup-${STAMP}.tar"
 
-CONFIG_ENV="${HOME}/.config/devbox/config.env"
-ENABLE_HTTPS="false"
-if [ -f "${CONFIG_ENV}" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "${CONFIG_ENV}"
-    set +a
-fi
+mkdir -p "${DEVBOX_BACKUP_DIR}"
+STAGING=$(mktemp -d "${DEVBOX_BACKUP_DIR}/.staging-XXXXXX")
+PAUSED=()
+OUT=""
+cleanup() {
+    local c
+    for c in "${PAUSED[@]}"; do docker unpause "${c}" >/dev/null 2>&1 || true; done
+    rm -rf "${STAGING}"
+    [ -z "${OUT}" ] || rm -f "${OUT}.partial"
+}
+trap cleanup EXIT
+mkdir -p "${STAGING}/volumes"
 
-mkdir -p "${STAGING}"
-trap 'rm -rf "${STAGING}"' EXIT
-
-# ---------------------------------------------------------------------------
-# Phase 1: tar each named volume into the staging dir.
-# ---------------------------------------------------------------------------
-declare -a VOLUME_ARCHIVES=()
-if [ "${DEVBOX_SERVICES+set}" = "set" ]; then
-    for svc in "${DEVBOX_SERVICES[@]}"; do
-        vols="$(devbox_get "${svc}" VOLUMES)"
-        for vol in ${vols}; do
-            if ! docker volume inspect "${vol}" >/dev/null 2>&1; then
-                echo "  [SKIP] volume ${vol} not found (service may not be started)"
-                continue
-            fi
-            archive="${STAGING}/${vol}.tgz"
-            echo "  -> Exporting volume ${vol}..."
-            docker run --rm \
-                -v "${vol}:/data:ro" \
-                -v "${STAGING}:/backup" \
-                "${ALPINE_BACKUP_IMAGE}" \
-                tar -czf "/backup/${vol}.tgz" -C /data .
-            VOLUME_ARCHIVES+=("${archive}")
-        done
-    done
-fi
-
-# ---------------------------------------------------------------------------
-# Phase 2: collect host paths into the staging dir (.env files, acme.json,
-# exegol-workspace, ~/.config/devbox).
-# ---------------------------------------------------------------------------
-declare -a HOST_PATHS=()
-
-# Per-service .env files (mode 0600, contain secrets).
-if [ "${DEVBOX_SERVICES+set}" = "set" ]; then
-    for svc in "${DEVBOX_SERVICES[@]}"; do
-        subdir="$(devbox_get "${svc}" DIR)"
-        envfile="${DEVBOX_HOME}/${subdir}/.env"
-        if [ -f "${envfile}" ]; then
-            HOST_PATHS+=("${envfile}")
-        fi
-    done
-fi
-
-# Operator-managed .secrets dir (ollama-auth.txt, etc).
-if [ -d "${DEVBOX_HOME}/.secrets" ]; then
-    HOST_PATHS+=("${DEVBOX_HOME}/.secrets")
-fi
-
-# Contract-declared backup paths.
-if [ "${DEVBOX_BACKUP_PATHS+set}" = "set" ]; then
-    for p in ${DEVBOX_BACKUP_PATHS}; do
-        if [ -e "${p}" ]; then
-            HOST_PATHS+=("${p}")
-        else
-            echo "  [SKIP] not found: ${p}"
-        fi
-    done
-fi
-
-# letsencrypt acme.json is only useful in HTTPS mode; the contract path is
-# already in DEVBOX_BACKUP_PATHS but we keep a guard in case operator runs
-# this outside HTTPS mode.
-if [ "${ENABLE_HTTPS}" != "true" ]; then
-    echo "  [INFO] ENABLE_HTTPS=false; skipping ACME state if not present."
-fi
-
-if [ ${#VOLUME_ARCHIVES[@]} -eq 0 ] && [ ${#HOST_PATHS[@]} -eq 0 ]; then
-    echo "[ERROR] No backup sources found. Nothing to do." >&2
-    exit 1
-fi
-
-mkdir -p "${BACKUP_DIR}"
-
-echo "Creating backup archive..."
-echo "  Volume archives:"
-for a in "${VOLUME_ARCHIVES[@]:-}"; do
-    [ -n "${a:-}" ] && echo "    ${a}"
-done
-echo "  Host paths:"
-for p in "${HOST_PATHS[@]:-}"; do
-    [ -n "${p:-}" ] && echo "    ${p}"
-done
-
-# Reproducible tar (sorted names, zero mtime). Volume archives live in the
-# staging dir; host paths are added relative to / so absolute paths reproduce
-# on restore.
-TAR_INPUTS=()
-for a in "${VOLUME_ARCHIVES[@]:-}"; do
-    [ -n "${a:-}" ] && TAR_INPUTS+=("${a}")
-done
-for p in "${HOST_PATHS[@]:-}"; do
-    [ -n "${p:-}" ] && TAR_INPUTS+=("${p}")
-done
-
-tar --sort=name --mtime='@0' -czf "${ARCHIVE_BASE}" "${TAR_INPUTS[@]}"
-
-echo "  Archive: ${ARCHIVE_BASE} ($(du -sh "${ARCHIVE_BASE}" | cut -f1))"
-
-# -----------------------------------------------------------------------
-# Encryption-at-rest
-# -----------------------------------------------------------------------
-ENCRYPTED_PATH=""
-
-# Option 1: GPG
-if command -v gpg >/dev/null 2>&1; then
-    FIRST_KEY=$(gpg --list-secret-keys --with-colons 2>/dev/null \
-        | awk -F: '/^sec/{print $5; exit}' || true)
-    if [ -n "${FIRST_KEY}" ]; then
-        echo "  Encrypting with GPG key: ${FIRST_KEY}..."
-        ENCRYPTED_PATH="${ARCHIVE_BASE}.gpg"
-        gpg --batch --yes --encrypt --recipient "${FIRST_KEY}" \
-            --output "${ENCRYPTED_PATH}" "${ARCHIVE_BASE}"
-        rm -f "${ARCHIVE_BASE}"
-        echo "  Encrypted archive: ${ENCRYPTED_PATH}"
-    fi
-fi
-
-# Option 2: age (if no GPG key)
-if [ -z "${ENCRYPTED_PATH}" ] && command -v age >/dev/null 2>&1; then
-    AGE_KEY_FILE="${HOME}/.config/devbox/age-key.pub"
-    if [ -f "${AGE_KEY_FILE}" ]; then
-        echo "  Encrypting with age key from ${AGE_KEY_FILE}..."
-        ENCRYPTED_PATH="${ARCHIVE_BASE}.age"
-        age --recipient-file "${AGE_KEY_FILE}" \
-            --output "${ENCRYPTED_PATH}" "${ARCHIVE_BASE}"
-        rm -f "${ARCHIVE_BASE}"
-        echo "  Encrypted archive: ${ENCRYPTED_PATH}"
+# tar_image <service> <volume> — an image already trusted by the stack that
+# ships GNU tar: the one a container using the volume runs, else the
+# service's first locked image.
+tar_image() {
+    local c
+    c=$(docker ps -aq --filter "volume=$2" | head -n1)
+    if [ -n "${c}" ]; then
+        docker inspect -f '{{.Image}}' "${c}"
     else
-        echo "  [WARN] age is installed but no key found at ${AGE_KEY_FILE}"
-        echo "         Generate one: age-keygen -o ~/.config/devbox/age-key.txt"
-        echo "         Then: grep ^Age-public-key ~/.config/devbox/age-key.txt > ${AGE_KEY_FILE}"
+        ( cd "${DEVBOX_HOME}/$1" && docker compose config --images | head -n1 )
     fi
+}
+
+BACKED_UP=()
+for svc in "${DEVBOX_SERVICES[@]}"; do
+    vols=$(docker volume ls -q --filter "label=com.docker.compose.project=${svc}")
+    for vol in ${vols}; do
+        key=$(docker volume inspect -f '{{index .Labels "com.docker.compose.volume"}}' "${vol}")
+        if [[ " ${DEVBOX_BACKUP_EXCLUDE_VOLUMES} " == *" ${key} "* ]]; then
+            echo "  skip   ${vol} (excluded: re-pullable)"
+            continue
+        fi
+        image=$(tar_image "${svc}" "${vol}")
+        mapfile -t users < <(docker ps -q --filter "volume=${vol}")
+        for c in "${users[@]}"; do docker pause "${c}" >/dev/null && PAUSED+=("${c}"); done
+        docker run --rm --network none --user 0:0 --entrypoint sh \
+            -v "${vol}:/data:ro" -v "${STAGING}/volumes:/backup" "${image}" \
+            -c "tar -czf '/backup/${vol}.tgz' -C /data . && chown $(id -u):$(id -g) '/backup/${vol}.tgz'"
+        for c in "${PAUSED[@]}"; do docker unpause "${c}" >/dev/null; done
+        PAUSED=()
+        BACKED_UP+=("${vol}")
+        echo "  volume ${vol}"
+    done
+done
+
+paths=()
+for p in ${DEVBOX_BACKUP_PATHS}; do
+    [ -e "${DEVBOX_OWNER_HOME}/${p}" ] && paths+=("${p}")
+done
+for svc in "${DEVBOX_SERVICES[@]}"; do
+    [ -f "${DEVBOX_HOME}/${svc}/.env" ] && paths+=("${DEVBOX_HOME#"${DEVBOX_OWNER_HOME}/"}/${svc}/.env")
+done
+tar -C "${DEVBOX_OWNER_HOME}" --ignore-failed-read -czf "${STAGING}/files.tgz" "${paths[@]}"
+echo "  files  ${paths[*]}"
+
+if docker ps --format '{{.Names}}' | grep -qx ollama; then
+    docker exec ollama ollama list >"${STAGING}/ollama-models.txt" || true
 fi
 
-# Option 3: Plaintext fallback (loud warning)
-if [ -z "${ENCRYPTED_PATH}" ]; then
-    echo ""
-    echo "============================================================" >&2
-    echo "  WARNING: BACKUP IS NOT ENCRYPTED                         " >&2
-    echo "  Install GPG and generate a key, or install age.          " >&2
-    echo "  The archive contains credentials and persistent data.    " >&2
-    echo "  Archive: ${ARCHIVE_BASE}                                 " >&2
-    echo "============================================================" >&2
-    echo ""
-    chmod 600 "${ARCHIVE_BASE}"
-    echo "  Set archive permissions to 600 (plaintext - no encryption available)"
-fi
+cat >"${STAGING}/MANIFEST" <<MANIFEST
+created=${STAMP}
+host=$(hostname)
+contract=${DEVBOX_CONTRACT_VERSION}
+volumes=${BACKED_UP[*]}
+MANIFEST
 
-echo ""
-echo "[OK] Backup complete."
-FINAL="${ENCRYPTED_PATH:-${ARCHIVE_BASE}}"
-echo "  Final: ${FINAL}"
-ls -lh "${FINAL}"
+# Encrypt while streaming: a plaintext copy never touches the disk when
+# encryption is configured, and a failure leaves only a .partial (removed).
+AGE_RECIPIENTS="${DEVBOX_CONFIG_DIR}/age-recipients.txt"
+GPG_RECIPIENT="$(devbox_config_get BACKUP_GPG_RECIPIENT)"
+if [ -s "${AGE_RECIPIENTS}" ]; then
+    OUT="${ARCHIVE}.age"
+    tar -C "${STAGING}" -cf - . | age -R "${AGE_RECIPIENTS}" -o "${OUT}.partial"
+elif [ -n "${GPG_RECIPIENT}" ]; then
+    OUT="${ARCHIVE}.gpg"
+    tar -C "${STAGING}" -cf - . | gpg --batch --yes --trust-model always -r "${GPG_RECIPIENT}" -o "${OUT}.partial" -e
+else
+    OUT="${ARCHIVE}"
+    tar -C "${STAGING}" -cf "${OUT}.partial" .
+    echo "WARNING: backup is NOT encrypted (it contains credentials). Add age recipients to ${AGE_RECIPIENTS}." >&2
+fi
+chmod 0600 "${OUT}.partial"
+mv "${OUT}.partial" "${OUT}"
+
+# Retention over finished archives only; timestamps sort lexically.
+mapfile -t old < <(find "${DEVBOX_BACKUP_DIR}" -maxdepth 1 -regextype posix-extended \
+    -regex '.*/devbox-backup-[0-9TZ]+\.tar(\.age|\.gpg)?' -printf '%f\n' | sort -r | tail -n "+$(( KEEP + 1 ))")
+for f in "${old[@]}"; do rm -f "${DEVBOX_BACKUP_DIR:?}/${f}"; done
+
+echo "[ok] ${OUT} ($(du -h "${OUT}" | cut -f1))"

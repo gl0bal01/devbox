@@ -1,121 +1,71 @@
 #!/usr/bin/env bash
-# Connect/disconnect/check HTB VPN using PID-file based process management.
-# Usage: ./htb-vpn.sh [path/to/ovpn] [start|stop|status]
+# Connect, disconnect or check the HTB/THM OpenVPN tunnel.
+# Usage: htb-vpn.sh [path/to/lab.ovpn] [start|stop|status]
+#        htb-vpn.sh stop|status
 #
-# F5: Uses --writepid /run/devbox/htb-vpn.pid instead of global pkill.
+# The daemon is tracked through a PID file in /run/devbox (created at boot by
+# /etc/tmpfiles.d/devbox.conf); `stop` signals only that process, and only if
+# it is openvpn. setup.sh allows `sudo openvpn` and
+# `sudo pkill -F /run/devbox/htb-vpn.pid openvpn` without a password.
 set -euo pipefail
 
-OVPN_FILE="${1:-${HOME}/htb/lab.ovpn}"
-ACTION="${2:-start}"
-
-PID_DIR="/run/devbox"
+case "${1:-}" in
+    start|stop|status) ACTION="$1"; OVPN_FILE="${2:-${HOME}/htb/lab.ovpn}" ;;
+    *)                 OVPN_FILE="${1:-${HOME}/htb/lab.ovpn}"; ACTION="${2:-start}" ;;
+esac
+PID_DIR="${DEVBOX_RUN_DIR:-/run/devbox}"
 PID_FILE="${PID_DIR}/htb-vpn.pid"
 LOG_FILE="${PID_DIR}/htb-vpn.log"
+TUN_WAIT="${HTB_VPN_TUN_WAIT:-10}"
 
-# Escape a string for use as a regex literal (backslash-escape metachars)
-escape_regex() {
-    # shellcheck disable=SC2001
-    echo "$1" | sed 's/[]\.^$*+?{}|()/\\&/g'
-}
+running_pid() { [ -f "${PID_FILE}" ] && pgrep -F "${PID_FILE}" openvpn; }
+stop_tunnel() { sudo pkill -F "${PID_FILE}" openvpn; }
 
 case "${ACTION}" in
     start)
         if [ ! -f "${OVPN_FILE}" ]; then
-            echo "[ERROR] OVPN file not found: ${OVPN_FILE}" >&2
-            echo ""
-            echo "Usage: $0 /path/to/your.ovpn [start|stop|status]"
-            echo ""
-            echo "Available OVPN files in ~/htb:"
-            ls -la "${HOME}/htb/"*.ovpn 2>/dev/null || echo "  (none found)"
+            echo "OVPN file not found: ${OVPN_FILE}" >&2
+            ls "${HOME}"/htb/*.ovpn 2>/dev/null | sed 's/^/  /' >&2 || true
             exit 1
         fi
-
-        # Enforce restrictive permissions on OVPN file (may contain credentials)
-        OVPN_PERMS=$(stat -c %a "${OVPN_FILE}" 2>/dev/null)
-        if [ "${OVPN_PERMS}" != "600" ]; then
-            echo "Securing OVPN file permissions (was ${OVPN_PERMS}, setting to 600)"
-            chmod 600 "${OVPN_FILE}"
+        [ -d "${PID_DIR}" ] || { echo "${PID_DIR} missing: re-run setup.sh (tmpfiles.d/devbox.conf)." >&2; exit 1; }
+        chmod 600 "${OVPN_FILE}"
+        if pid=$(running_pid); then
+            echo "Stopping previous tunnel (PID ${pid})"
+            stop_tunnel
+            sleep 1
         fi
-
-        # Ensure PID directory exists with correct ownership
-        sudo install -d -m 0755 -o "${USER}" "${PID_DIR}"
-
-        # Kill any stale PID-file process
-        if [ -f "${PID_FILE}" ]; then
-            OLD_PID=$(cat "${PID_FILE}")
-            if kill -0 "${OLD_PID}" 2>/dev/null; then
-                echo "Stopping existing VPN process (PID ${OLD_PID})..."
-                sudo kill "${OLD_PID}" || true
-                sleep 1
-            fi
-            sudo rm -f "${PID_FILE}"
-        fi
-
-        echo "Connecting to HTB VPN..."
-        echo "   Config: ${OVPN_FILE}"
-        echo "   Log:    ${LOG_FILE}"
-
-        sudo openvpn \
-            --config "${OVPN_FILE}" \
-            --daemon \
-            --writepid "${PID_FILE}" \
-            --log "${LOG_FILE}"
-
-        # Wait for tun0
-        for _i in $(seq 1 10); do
-            if ip addr show tun0 >/dev/null 2>&1; then
-                echo ""
-                echo "[OK] Connected!"
-                ip addr show tun0 | grep -E "inet " | awk '{print "   VPN IP: "$2}'
+        rm -f "${PID_FILE}"
+        sudo openvpn --config "${OVPN_FILE}" --daemon --writepid "${PID_FILE}" --log "${LOG_FILE}"
+        for _ in $(seq 1 "${TUN_WAIT}"); do
+            if ip -4 addr show tun0 >/dev/null 2>&1; then
+                ip -4 -o addr show tun0 | awk '{print "[ok] Connected, VPN IP " $4}'
                 exit 0
             fi
             sleep 1
-            printf '.'
         done
-
-        echo ""
-        echo "[ERROR] Connection may have failed. Check: tail -f ${LOG_FILE}" >&2
+        echo "No tun0 after ${TUN_WAIT}s. Log: ${LOG_FILE}" >&2
         exit 1
         ;;
-
     stop)
-        echo "Disconnecting HTB VPN..."
-        if [ -f "${PID_FILE}" ]; then
-            VPID=$(cat "${PID_FILE}")
-            if kill -0 "${VPID}" 2>/dev/null; then
-                sudo kill "${VPID}"
-                echo "[OK] Sent SIGTERM to PID ${VPID}"
-            else
-                echo "PID ${VPID} from pidfile is not running."
-            fi
-            sudo rm -f "${PID_FILE}"
+        if pid=$(running_pid); then
+            stop_tunnel
+            echo "[ok] Stopped PID ${pid}"
         else
-            echo "No PID file at ${PID_FILE}."
-            # Fallback: regex-escaped pkill (avoid matching the calling script)
-            ESCAPED=$(escape_regex "openvpn")
-            if sudo pkill -f "^${ESCAPED}" 2>/dev/null; then
-                echo "Killed openvpn process via pkill fallback."
-            else
-                echo "No openvpn process found."
-            fi
+            echo "Not running."
         fi
-        echo "[OK] Disconnected"
+        rm -f "${PID_FILE}"
         ;;
-
     status)
-        if ip addr show tun0 >/dev/null 2>&1; then
-            echo "[OK] VPN Connected"
-            ip addr show tun0 | grep -E "inet " | awk '{print "   VPN IP: "$2}'
-            if [ -f "${PID_FILE}" ]; then
-                echo "   PID: $(cat "${PID_FILE}")"
-            fi
+        if ip -4 addr show tun0 >/dev/null 2>&1; then
+            ip -4 -o addr show tun0 | awk '{print "[ok] Connected, VPN IP " $4}'
+            if pid=$(running_pid); then echo "     PID ${pid}"; fi
         else
-            echo "[--] VPN Not Connected"
+            echo "Not connected."
         fi
         ;;
-
     *)
         echo "Usage: $0 [ovpn-file] [start|stop|status]" >&2
-        exit 1
+        exit 2
         ;;
 esac

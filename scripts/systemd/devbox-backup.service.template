@@ -1,7 +1,7 @@
 [Unit]
 Description=DevBox backup
-Requires=devbox.service
-After=devbox.service
+Requires=docker.service
+After=docker.service devbox.service
 
 [Service]
 Type=oneshot

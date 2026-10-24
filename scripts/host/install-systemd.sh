@@ -1,106 +1,25 @@
 #!/usr/bin/env bash
-# =============================================================================
-# install-systemd.sh — Render and install devbox systemd units
-# =============================================================================
-# Renders devbox.service, devbox-backup.service, and devbox-backup.timer from
-# templates in ${DEVBOX_HOME}/systemd/ using envsubst, writes them to
-# /etc/systemd/system/, then enables devbox.service + devbox-backup.timer.
-#
-# The service is NOT started automatically. Operator decides when to start:
-#   sudo systemctl start devbox.service
-#   sudo systemctl list-timers devbox-backup.timer
-#
-# Requires root (runs as part of post-install hardening).
-# =============================================================================
+# Install devbox.service (start the stack at boot) and devbox-backup.timer
+# (daily backup.sh) from the templates in ${DEVBOX_HOME}/systemd/.
+# Run as root: sudo ~/docker/install-systemd.sh
+# Units are enabled, not started: sudo systemctl start devbox.service
 set -euo pipefail
 
-# Root guard.
-if [ "$(id -u)" -ne 0 ]; then
-    echo "[ERROR] install-systemd.sh must be run as root (sudo)." >&2
-    exit 1
-fi
+[ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0" >&2; exit 1; }
 
-# Locate the installed runtime contract.
-DEVBOX_HOME="${DEVBOX_HOME:-${HOME}/docker}"
-CONTRACT="${DEVBOX_HOME}/lib/devbox-contract.sh"
+# Resolve from this script's location: under sudo, HOME is /root.
+export DEVBOX_HOME="${DEVBOX_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+[ -f "${DEVBOX_HOME}/lib/devbox-contract.sh" ] || { echo "No devbox install at ${DEVBOX_HOME}" >&2; exit 1; }
+DEVBOX_USER="$(stat -c %U "${DEVBOX_HOME}")"
+export DEVBOX_USER
 
-if [ ! -f "${CONTRACT}" ]; then
-    echo "[ERROR] Missing ${CONTRACT}." >&2
-    echo "        Run setup.sh to install the runtime contract first." >&2
-    exit 1
-fi
-# shellcheck disable=SC1090
-. "${CONTRACT}"
-
-# Resolve DEVBOX_USER from the install-level config.env (written by setup.sh
-# with the operator's real account). The contract default ("dev" or whatever
-# the contract resolved at install time) acts as the final fallback.
-CONFIG_ENV="${SUDO_USER:+/home/${SUDO_USER}}/.config/devbox/config.env"
-[ -z "${SUDO_USER:-}" ] && CONFIG_ENV="${HOME}/.config/devbox/config.env"
-if [ -f "${CONFIG_ENV}" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "${CONFIG_ENV}"
-    set +a
-fi
-
-TEMPLATE_DIR="${DEVBOX_HOME}/systemd"
-SYSTEMD_DIR="/etc/systemd/system"
-
-if [ ! -d "${TEMPLATE_DIR}" ]; then
-    echo "[ERROR] Template directory not found: ${TEMPLATE_DIR}" >&2
-    echo "        Re-run setup.sh to sync the systemd templates." >&2
-    exit 1
-fi
-
-echo "=== devbox systemd install ==="
-echo "  DEVBOX_HOME : ${DEVBOX_HOME}"
-echo "  DEVBOX_USER : ${DEVBOX_USER}"
-echo "  templates   : ${TEMPLATE_DIR}"
-echo "  target dir  : ${SYSTEMD_DIR}"
-echo ""
-
-# Render each template with only DEVBOX_USER and DEVBOX_HOME substituted.
-for tmpl in \
-    devbox.service.template \
-    devbox-backup.service.template \
-    devbox-backup.timer.template; do
-
-    src="${TEMPLATE_DIR}/${tmpl}"
-    # Strip the trailing .template suffix to get the unit name.
-    unit="${SYSTEMD_DIR}/${tmpl%.template}"
-
-    if [ ! -f "${src}" ]; then
-        echo "[ERROR] Template missing: ${src}" >&2
-        exit 1
-    fi
-
-    # envsubst with an explicit variable allowlist prevents accidental
-    # expansion of other shell variables present in the template body.
-    envsubst '$DEVBOX_USER $DEVBOX_HOME' <"${src}" >"${unit}"
-    chmod 0644 "${unit}"
-    echo "  [OK] rendered ${tmpl%.template} -> ${unit}"
+for unit in devbox.service devbox-backup.service devbox-backup.timer; do
+    envsubst '$DEVBOX_USER $DEVBOX_HOME' <"${DEVBOX_HOME}/systemd/${unit}.template" >"/etc/systemd/system/${unit}"
+    chmod 0644 "/etc/systemd/system/${unit}"
+    echo "  installed /etc/systemd/system/${unit}"
 done
-
-echo ""
-echo "Reloading systemd daemon..."
+systemd-analyze verify /etc/systemd/system/devbox.service /etc/systemd/system/devbox-backup.service \
+    /etc/systemd/system/devbox-backup.timer || echo "[warn] systemd-analyze verify reported problems (above)." >&2
 systemctl daemon-reload
-echo "  [OK] daemon-reload"
-
-echo ""
-echo "Enabling units..."
-systemctl enable devbox.service
-echo "  [OK] devbox.service enabled"
-systemctl enable devbox-backup.timer
-echo "  [OK] devbox-backup.timer enabled"
-
-echo ""
-echo "=== Next steps ==="
-echo "  Start the stack:"
-echo "    sudo systemctl start devbox.service"
-echo ""
-echo "  Verify the backup timer:"
-echo "    sudo systemctl list-timers devbox-backup.timer"
-echo ""
-echo "  Check service status:"
-echo "    sudo systemctl status devbox.service"
+systemctl enable devbox.service devbox-backup.timer
+echo "[ok] Enabled for ${DEVBOX_USER}. Start now: sudo systemctl start devbox.service"

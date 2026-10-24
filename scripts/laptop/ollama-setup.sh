@@ -1,157 +1,63 @@
 #!/usr/bin/env bash
-# DevBox v3 — Ollama Remote Client Setup for Laptop
+# Laptop side: shell helpers (ask, askcode, chat, ollamals) for the devbox
+# Ollama API at http://ollama.internal, behind Traefik basic auth.
 #
-# Configures a local laptop to call a remote Ollama server via Tailscale.
-# Adds shell functions (ask, askcode, chat, ai, ollamals) for quick AI lookups.
+# Usage (laptop on the same tailnet, ollama.internal resolving to the server):
+#   DEVBOX_OLLAMA_AUTH="$(ssh -p 5522 dev@<server> cat docker/.secrets/ollama-auth.txt)" \
+#     bash scripts/laptop/ollama-setup.sh
 #
-# v3 changes from v2 (F6 / Critic Medium #18):
-#   - JSON payloads built via `jq -n --arg` so unsanitized prompts can no longer
-#     escape the JSON envelope (the v2 functions concatenated the prompt directly
-#     into a JSON string, which is a classic injection).
-#   - Idempotent shell-rc append: re-running this script does NOT duplicate
-#     the configuration block in ~/.zshrc / ~/.bashrc.
-#   - Safe shell detection: prefers $SHELL over $ZSH_VERSION/$BASH_VERSION which
-#     are unreliable when bash is invoked via `bash script.sh` (BASH_VERSION
-#     is set even if the user's login shell is zsh).
-#   - `set -euo pipefail` for safety.
-#
-# Usage:
-#   export OLLAMA_SERVER_IP="100.x.x.x"   # Your server's Tailscale IP
-#   bash scripts/laptop/ollama-setup.sh
-#
-# Find your Tailscale IP:
-#   ssh your-server "tailscale ip -4"
-
+# Optional: DEVBOX_OLLAMA_URL (default http://ollama.internal),
+#           DEVBOX_OLLAMA_MODEL (default llama3.2).
+# The credential is stored in ~/.config/devbox/ollama.curlrc (mode 0600) and
+# passed to curl with -K, so it never appears on a command line. Re-run after
+# rotate-ollama-auth.sh. Re-running replaces the managed block in your rc file.
 set -euo pipefail
 
-if [ -z "${OLLAMA_SERVER_IP:-}" ]; then
-  echo "Error: OLLAMA_SERVER_IP not set" >&2
-  echo ""
-  echo "Usage:"
-  echo "  export OLLAMA_SERVER_IP=\"100.x.x.x\"   # Your server's Tailscale IP"
-  echo "  bash $0"
-  echo ""
-  echo "Find your Tailscale IP:"
-  echo "  ssh your-server \"tailscale ip -4\""
-  exit 1
-fi
+[[ "${DEVBOX_OLLAMA_AUTH:-}" == ?*:?* ]] || { sed -n '5,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
-OLLAMA_HOST="http://${OLLAMA_SERVER_IP}:11434"
+URL="${DEVBOX_OLLAMA_URL:-http://ollama.internal}"
+MODEL="${DEVBOX_OLLAMA_MODEL:-llama3.2}"
+CURLRC="${HOME}/.config/devbox/ollama.curlrc"
 
-# Detect login shell (more reliable than $ZSH_VERSION / $BASH_VERSION when
-# this script is invoked as `bash script.sh` from a zsh login shell).
-LOGIN_SHELL_BASENAME=$(basename "${SHELL:-$BASH}")
-case "${LOGIN_SHELL_BASENAME}" in
-  zsh)  SHELL_CONFIG="$HOME/.zshrc" ;;
-  bash) SHELL_CONFIG="$HOME/.bashrc" ;;
-  *)    SHELL_CONFIG="$HOME/.profile" ;;
+umask 077
+mkdir -p "$(dirname "${CURLRC}")"
+printf 'user = "%s"\n' "${DEVBOX_OLLAMA_AUTH}" >"${CURLRC}"
+code=$(curl -s -o /dev/null -w '%{http_code}' -K "${CURLRC}" "${URL}/api/version" || true)
+[ "${code}" = 200 ] || echo "warning: ${URL}/api/version answered HTTP ${code:-none} (check DNS, tailnet, credential)" >&2
+
+case "$(basename "${SHELL:-bash}")" in
+    zsh)  RC="${HOME}/.zshrc" ;;
+    bash) RC="${HOME}/.bashrc" ;;
+    *)    RC="${HOME}/.profile" ;;
 esac
-
-echo "Setting up Ollama remote access..."
-echo "  Target:        $OLLAMA_HOST"
-echo "  Shell config:  $SHELL_CONFIG"
-echo "  Login shell:   $LOGIN_SHELL_BASENAME"
-echo ""
-
-# Idempotency marker — re-running this script must not duplicate the block.
-MARKER_BEGIN="# >>> devbox-ollama-remote (managed) >>>"
-MARKER_END="# <<< devbox-ollama-remote (managed) <<<"
-
-# Backup once per run
-if [ -f "$SHELL_CONFIG" ]; then
-  cp "$SHELL_CONFIG" "$SHELL_CONFIG.devbox-backup.$(date +%Y%m%d_%H%M%S)"
+BEGIN="# >>> devbox-ollama (managed by scripts/laptop/ollama-setup.sh) >>>"
+END="# <<< devbox-ollama <<<"
+touch "${RC}"
+if grep -qxF "${BEGIN}" "${RC}" && ! grep -qxF "${END}" "${RC}"; then
+    echo "${RC} has the devbox-ollama start marker but no end marker: fix it by hand first." >&2
+    exit 1
 fi
-
-# Strip any previous managed block (idempotent re-run)
-if [ -f "$SHELL_CONFIG" ] && grep -qF "$MARKER_BEGIN" "$SHELL_CONFIG"; then
-  echo "  Removing previous devbox-ollama-remote block..."
-  # Use a temp file rather than in-place sed to avoid TOCTOU on $SHELL_CONFIG
-  tmp="${SHELL_CONFIG}.devbox-tmp.$$"
-  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-    $0 == b {skip=1; next}
-    $0 == e {skip=0; next}
-    !skip {print}
-  ' "$SHELL_CONFIG" >"$tmp"
-  mv "$tmp" "$SHELL_CONFIG"
-fi
-
-# Append the managed block. The shell functions inside use `jq -n --arg` to
-# build JSON safely — see F6 / Medium #18 in the production-readiness review.
+awk -v b="${BEGIN}" -v e="${END}" '$0 == b {skip = 1; next} $0 == e {skip = 0; next} !skip' "${RC}" >"${RC}.devbox-tmp"
 {
-  echo ""
-  echo "$MARKER_BEGIN"
-  echo "# Managed by scripts/laptop/ollama-setup.sh — re-run to refresh."
-  echo "export OLLAMA_SERVER_IP=\"${OLLAMA_SERVER_IP}\""
-  echo "export OLLAMA_HOST=\"http://\${OLLAMA_SERVER_IP}:11434\""
-  cat <<'OLLAMAFNS'
-
-# Quick ask — returns just the answer
-ask() {
-  if [ $# -eq 0 ]; then
-    echo "Usage: ask \"your question here\""
-    return 1
-  fi
-  local prompt="$*"
-  local payload
-  payload=$(jq -n --arg m "qwen3" --arg p "$prompt" \
-    '{model:$m, prompt:$p, stream:false}')
-  curl -s "$OLLAMA_HOST/api/generate" -d "$payload" | jq -r '.response'
+    cat "${RC}.devbox-tmp"
+    echo "${BEGIN}"
+    echo "export DEVBOX_OLLAMA_URL=\"${URL}\" DEVBOX_OLLAMA_MODEL=\"${MODEL}\""
+    cat <<'FNS'
+_devbox_ollama() {  # <stream:true|false> <prompt>
+    jq -n --arg m "$DEVBOX_OLLAMA_MODEL" --arg p "$2" --argjson s "$1" '{model: $m, prompt: $p, stream: $s}' \
+        | curl -sS -N -K "$HOME/.config/devbox/ollama.curlrc" "$DEVBOX_OLLAMA_URL/api/generate" -d @- \
+        | jq --unbuffered -rj '.response // empty'
+    echo
 }
-
-# Code-specific questions
-askcode() {
-  if [ $# -eq 0 ]; then
-    echo "Usage: askcode \"your code question\""
-    return 1
-  fi
-  local prompt="You are a coding assistant. Answer concisely with code when appropriate. Question: $*"
-  local payload
-  payload=$(jq -n --arg m "qwen3" --arg p "$prompt" \
-    '{model:$m, prompt:$p, stream:false}')
-  curl -s "$OLLAMA_HOST/api/generate" -d "$payload" | jq -r '.response'
-}
-
-# Chat with streaming
-chat() {
-  if [ $# -eq 0 ]; then
-    echo "Usage: chat \"your question\""
-    return 1
-  fi
-  local prompt="$*"
-  local payload
-  payload=$(jq -n --arg m "qwen3" --arg p "$prompt" \
-    '{model:$m, prompt:$p, stream:true}')
-  curl -s "$OLLAMA_HOST/api/generate" -d "$payload" | while IFS= read -r line; do
-    printf '%s' "$(printf '%s' "$line" | jq -r '.response // empty')"
-  done
-  echo ""
-}
-
-# List remote models
-ollamals() {
-  curl -s "$OLLAMA_HOST/api/tags" | jq -r '.models[].name'
-}
-
-# Short alias for ask
-alias ai='ask'
-OLLAMAFNS
-  echo "$MARKER_END"
-} >>"$SHELL_CONFIG"
-
-echo "Configuration appended to $SHELL_CONFIG"
-echo ""
-echo "Reload your shell with:"
-echo "  source $SHELL_CONFIG"
-echo ""
-echo "Available commands:"
-echo "  ask \"question\"       — Quick question, get answer only"
-echo "  askcode \"question\"   — Code-specific questions"
-echo "  chat \"question\"      — Streaming responses"
-echo "  ollamals              — List available models"
-echo "  ai \"question\"        — Short alias for 'ask'"
-echo ""
-echo "Examples:"
-echo "  ask 'What is Python?'"
-echo "  ask 'He said \"hi\" then walked away.'   # quotes/escapes are SAFE now"
-echo "  askcode 'Write hello world in Rust'"
-echo "  chat 'Explain Docker'"
+ask()      { [ $# -gt 0 ] || { echo 'usage: ask "question"'; return 1; }; _devbox_ollama false "$*"; }
+askcode()  { [ $# -gt 0 ] || { echo 'usage: askcode "question"'; return 1; }; _devbox_ollama false "You are a coding assistant. Answer concisely, with code when useful. Question: $*"; }
+chat()     { [ $# -gt 0 ] || { echo 'usage: chat "question"'; return 1; }; _devbox_ollama true "$*"; }
+ollamals() { curl -sS -K "$HOME/.config/devbox/ollama.curlrc" "$DEVBOX_OLLAMA_URL/api/tags" | jq -r '.models[].name'; }
+FNS
+    echo "${END}"
+} >"${RC}.devbox-new"
+rm -f "${RC}.devbox-tmp"
+cat "${RC}.devbox-new" >"${RC}"   # keeps symlinks and mode
+rm -f "${RC}.devbox-new"
+echo "Updated ${RC}. Reload: source ${RC}. Commands: ask, askcode, chat, ollamals"

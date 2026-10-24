@@ -1,32 +1,16 @@
 #!/usr/bin/env bash
-# Rotate the VNC/noVNC password for a running Exegol container.
+# Rotate the noVNC (root) password of a running Exegol container.
 # Usage: exegol-reset-vnc.sh <container-name>
-#
-# Prints the new password once to stdout.
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <container-name>" >&2
-    echo "Example: $0 exegol-htb" >&2
+CONTAINER="${1:-}"
+if [ -z "${CONTAINER}" ] || ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
+    echo "Usage: $0 <running-container>   (e.g. exegol-htb)" >&2
+    docker ps --format '  {{.Names}}' | grep exegol- >&2 || true
     exit 1
 fi
 
-CONTAINER="$1"
-
-# Verify container exists and is running
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
-    echo "[ERROR] Container '${CONTAINER}' is not running." >&2
-    echo "        Running containers:" >&2
-    docker ps --format '  {{.Names}}' >&2
-    exit 1
-fi
-
-PASS=$(openssl rand -base64 12)
-
-docker exec "${CONTAINER}" bash -c "echo 'root:${PASS}' | chpasswd"
-
-echo ""
-echo "VNC password rotated for container: ${CONTAINER}"
-echo "  New password: ${PASS}"
-echo ""
-echo "Use this password at the noVNC login prompt."
+PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9')
+# Password goes through stdin: never on a command line visible in ps.
+printf 'root:%s\n' "${PASS}" | docker exec -i "${CONTAINER}" chpasswd
+echo "New noVNC password for ${CONTAINER} (user root): ${PASS}"

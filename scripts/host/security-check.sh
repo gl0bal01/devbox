@@ -1,262 +1,108 @@
 #!/usr/bin/env bash
-# Security verification script based on SECURITY-AUDIT.md recommendations.
-# Sources the installed runtime contract for container names + install paths.
+# Verify the security properties devbox promises on this host. Read-only.
+# Exit 1 if any check FAILs. Needs the passwordless `sudo ufw` and
+# `sudo sshd -T` entries that setup.sh installs.
 set -euo pipefail
 
-DEVBOX_HOME="${DEVBOX_HOME:-${HOME}/docker}"
-CONTRACT="${DEVBOX_HOME}/lib/devbox-contract.sh"
-if [ -f "${CONTRACT}" ]; then
-    # shellcheck disable=SC1090
-    . "${CONTRACT}"
+export DEVBOX_HOME="${DEVBOX_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# shellcheck source=../lib/devbox-contract.sh
+. "${DEVBOX_HOME}/lib/devbox-contract.sh"
+
+PASS=0 WARN=0 FAIL=0
+pass() { printf '  [ok]   %s\n' "$*"; PASS=$((PASS + 1)); }
+warn() { printf '  [warn] %s\n' "$*"; WARN=$((WARN + 1)); }
+fail() { printf '  [FAIL] %s\n' "$*"; FAIL=$((FAIL + 1)); }
+
+SSH_PORT="$(devbox_config_get SSH_PORT 5522)"
+
+echo "Network exposure"
+# Docker-published ports bypass UFW, so this is the check that matters most.
+public=$(docker ps --format '{{.Names}} {{.Ports}}' | grep -E '(0\.0\.0\.0|\[::\]|:::):[0-9]+->' || true)
+if [ -z "${public}" ]; then
+    pass "No container publishes on all interfaces"
+else
+    fail "Containers publish on all interfaces (Docker bypasses UFW):"
+    printf '         %s\n' "${public}"
 fi
 
-# Build a flat list of every container name across services for iteration.
-declare -a ALL_CONTAINERS=()
-if [ "${DEVBOX_SERVICES+set}" = "set" ]; then
-    for _svc in "${DEVBOX_SERVICES[@]}"; do
-        _cn="$(devbox_get "${_svc}" CONTAINERS)"
-        for _n in ${_cn}; do
-            ALL_CONTAINERS+=("${_n}")
-        done
+wild=$(ss -Hltn | awk '{print $4}' | grep -E '^(0\.0\.0\.0|\*|\[::\]):[0-9]+$' | grep -vE ":${SSH_PORT}$" | sort -u || true)
+if [ -z "${wild}" ]; then
+    pass "Only sshd (:${SSH_PORT}) listens on all interfaces"
+else
+    warn "Host listeners on all interfaces (filtered by UFW; Exegol noVNC is expected here): $(echo "${wild}" | tr '\n' ' ')"
+fi
+
+if ufw_status=$(sudo -n ufw status verbose 2>/dev/null); then
+    if grep -q '^Status: active' <<<"${ufw_status}" && grep -q 'deny (incoming)' <<<"${ufw_status}"; then
+        pass "UFW active, default deny incoming"
+    else
+        fail "UFW inactive or not denying incoming by default"
+    fi
+else
+    warn "Cannot read UFW status (needs: sudo -n ufw)"
+fi
+
+if sshd_cfg=$(sudo -n sshd -T 2>/dev/null); then
+    for want in "port ${SSH_PORT}" "passwordauthentication no" "permitrootlogin no" "kbdinteractiveauthentication no"; do
+        if grep -qx "${want}" <<<"${sshd_cfg}"; then pass "sshd: ${want}"; else fail "sshd: expected '${want}'"; fi
     done
 else
-    ALL_CONTAINERS=(traefik ollama openwebui docker-socket-proxy)
+    warn "Cannot read effective sshd config (needs: sudo -n sshd -T)"
 fi
 
-# Subset that the per-container security/limits checks iterate explicitly
-# (kept to "service" containers only — skips docker-socket-proxy which has
-# its own purpose-built read-only/no-cap hardening covered by check 1).
-SERVICE_CONTAINERS=(traefik ollama openwebui)
-
-echo "Docker Security Verification"
-echo "======================================================================="
 echo ""
-
-PASS=0
-WARN=0
-FAIL=0
-
-check_pass() { echo "  [OK]   $1"; PASS=$((PASS+1)); }
-check_warn() { echo "  [WARN] $1"; WARN=$((WARN+1)); }
-check_fail() { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
-
-# -----------------------------------------------------------------------
-# Check 1: Docker socket proxy
-# -----------------------------------------------------------------------
-echo "1. Docker Socket Security"
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q docker-socket-proxy; then
-    check_pass "Docker socket proxy is running"
-else
-    check_fail "Docker socket proxy not running - Traefik has direct socket access"
-fi
-
-# -----------------------------------------------------------------------
-# Check 2: Secrets in environment variables
-# -----------------------------------------------------------------------
-echo ""
-echo "2. Secrets Management"
-LEAKED_SECRETS=$(docker ps -q 2>/dev/null | xargs -r docker inspect \
-    --format '{{.Name}} {{range .Config.Env}}{{.}} {{end}}' 2>/dev/null \
-    | grep -iE "(password|secret|key|token)=" \
-    | grep -v "WEBUI_SECRET_KEY=\${" \
-    | head -5 || true)
-if [ -z "${LEAKED_SECRETS}" ]; then
-    check_pass "No hardcoded secrets found in container environment"
-else
-    check_fail "Secrets found in container environment (check .env files):"
-    echo "${LEAKED_SECRETS}" | head -3 | sed 's/=[^ ]*/=***REDACTED***/g' | sed 's/^/       /'
-fi
-
-# -----------------------------------------------------------------------
-# Check 3: .env file permissions
-# -----------------------------------------------------------------------
-echo ""
-echo "3. Secret File Permissions"
-for envfile in "${DEVBOX_HOME}"/*/.env; do
-    if [ -f "${envfile}" ]; then
-        PERMS=$(stat -c %a "${envfile}" 2>/dev/null)
-        svcname=$(basename "$(dirname "${envfile}")")
-        if [ "${PERMS}" = "600" ]; then
-            check_pass "${svcname}/.env has correct permissions (600)"
-        else
-            check_warn "${svcname}/.env has permissions ${PERMS} (should be 600)"
+echo "Containers"
+for svc in "${DEVBOX_SERVICES[@]}"; do
+    for c in $(devbox_get "${svc}" CONTAINERS); do
+        if ! info=$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.HostConfig.SecurityOpt}}|{{.HostConfig.CapDrop}}|{{.HostConfig.Memory}}|{{.HostConfig.Privileged}}|{{.Config.Image}}' "${c}" 2>/dev/null); then
+            warn "${c}: not created (stack stopped?)"
+            continue
         fi
-    fi
+        IFS='|' read -r state health secopt capdrop mem privileged image <<<"${info}"
+        problems=()
+        [ "${state}" = running ] || problems+=("state=${state}")
+        [ -z "${health}" ] || [ "${health}" = healthy ] || problems+=("health=${health}")
+        [[ "${secopt}" == *no-new-privileges* ]] || problems+=("no no-new-privileges")
+        [[ "${capdrop}" == *ALL* ]] || problems+=("caps not dropped")
+        [ "${mem}" != 0 ] || problems+=("no memory limit")
+        [ "${privileged}" = false ] || problems+=("privileged")
+        [[ "${image}" =~ @sha256:[0-9a-f]{64}$ ]] || problems+=("image not digest-pinned (${image}): lockfile missing from COMPOSE_FILE")
+        if [ ${#problems[@]} -eq 0 ]; then pass "${c}"; else fail "${c}: ${problems[*]}"; fi
+    done
 done
-
-# .secrets/ollama-auth.txt — operator-visible credential, must be 600.
-OLLAMA_SECRET="${DEVBOX_HOME}/.secrets/ollama-auth.txt"
-if [ -f "${OLLAMA_SECRET}" ]; then
-    OS_PERMS=$(stat -c %a "${OLLAMA_SECRET}" 2>/dev/null)
-    if [ "${OS_PERMS}" = "600" ]; then
-        check_pass ".secrets/ollama-auth.txt has correct permissions (600)"
-    else
-        check_fail ".secrets/ollama-auth.txt has permissions ${OS_PERMS} (must be 600)"
-    fi
+sock=$(docker ps -q | xargs -r docker inspect -f '{{.Name}} {{range .Mounts}}{{.Source}} {{end}}' | grep '/var/run/docker.sock' | awk '{print substr($1, 2)}' | grep -vx docker-socket-proxy || true)
+if [ -z "${sock}" ]; then
+    pass "Only docker-socket-proxy mounts the Docker socket"
+else
+    warn "Containers mounting /var/run/docker.sock: $(echo "${sock}" | tr '\n' ' ')"
 fi
 
-# Check ~/.devbox-credentials if it exists (Scenario E mitigation)
-if [ -f "${HOME}/.devbox-credentials" ]; then
-    CRED_PERMS=$(stat -c %a "${HOME}/.devbox-credentials" 2>/dev/null)
-    if [ "${CRED_PERMS}" = "600" ]; then
-        check_pass "${HOME}/.devbox-credentials has correct permissions (600)"
-    else
-        check_fail "${HOME}/.devbox-credentials has permissions ${CRED_PERMS} (must be 600)"
-    fi
-fi
-
-# -----------------------------------------------------------------------
-# Check 4: Container security options
-# -----------------------------------------------------------------------
 echo ""
-echo "4. Container Security Options"
-for container in "${SERVICE_CONTAINERS[@]}"; do
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-        NO_NEW_PRIV=$(docker inspect "${container}" \
-            --format '{{.HostConfig.SecurityOpt}}' 2>/dev/null \
-            | grep -c "no-new-privileges" || true)
-        if [ "${NO_NEW_PRIV}" -gt 0 ]; then
-            check_pass "${container} has no-new-privileges"
-        else
-            check_warn "${container} missing no-new-privileges"
-        fi
-    fi
+echo "Secrets"
+check_mode() {
+    local want="$1" path="$2" got
+    [ -e "${path}" ] || return 0
+    got=$(stat -c %a "${path}")
+    if [ "${got}" = "${want}" ]; then pass "${path#"${DEVBOX_OWNER_HOME}/"} (${got})"; else fail "${path#"${DEVBOX_OWNER_HOME}/"} is ${got}, want ${want}"; fi
+}
+check_mode 700 "${DEVBOX_SECRETS_DIR}"
+for f in "${DEVBOX_SECRETS_DIR}"/* "${DEVBOX_HOME}"/*/.env "${DEVBOX_HOME}/traefik/ovh.env" \
+    "${DEVBOX_CONFIG}" "${DEVBOX_CONFIG_DIR}/ovh.env"; do
+    check_mode 600 "${f}"
 done
-
-# -----------------------------------------------------------------------
-# Check 5: Resource limits
-# -----------------------------------------------------------------------
-echo ""
-echo "5. Resource Limits"
-for container in "${SERVICE_CONTAINERS[@]}"; do
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-        MEM_LIMIT=$(docker inspect "${container}" \
-            --format '{{.HostConfig.Memory}}' 2>/dev/null)
-        if [ "${MEM_LIMIT}" != "0" ] && [ -n "${MEM_LIMIT}" ]; then
-            MEM_MB=$((MEM_LIMIT / 1024 / 1024))
-            check_pass "${container} has memory limit (${MEM_MB}MB)"
-        else
-            check_warn "${container} has no memory limit"
-        fi
-    fi
+for f in "${DEVBOX_HOME}"/traefik/dynamic/*-auth.yml; do
+    check_mode 640 "${f}"   # read by Traefik via group_add
 done
-
-# -----------------------------------------------------------------------
-# Check 6: Image versions (no :latest in compose files)
-# -----------------------------------------------------------------------
-echo ""
-echo "6. Image Versions"
-for container in "${SERVICE_CONTAINERS[@]}"; do
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-        IMAGE=$(docker inspect "${container}" \
-            --format '{{.Config.Image}}' 2>/dev/null)
-        if echo "${IMAGE}" | grep -qE ":latest$|:main$"; then
-            check_warn "${container} uses unpinned tag: ${IMAGE}"
-        else
-            check_pass "${container} uses pinned version: ${IMAGE}"
-        fi
-    fi
-done
-# Static check: grep installed compose files for :latest on core images
-LATEST_REFS=$(grep -r --include='docker-compose.yml' -E \
-    'image:\s*(traefik|ollama|ghcr\.io/open-webui|docker-socket-proxy):latest' \
-    "${DEVBOX_HOME}/" 2>/dev/null || true)
-if [ -n "${LATEST_REFS}" ]; then
-    check_fail "Compose file references :latest for a core image:"
-    # shellcheck disable=SC2001
-    echo "${LATEST_REFS}" | sed 's/^/       /'
-else
-    check_pass "No core compose files reference :latest"
+# Open WebUI persists ENABLE_SIGNUP in its database after first start, so ask
+# the running app rather than trusting .env.
+signup=$(docker exec openwebui curl -sf http://localhost:8080/api/config 2>/dev/null | jq -r '.features.enable_signup // empty' 2>/dev/null || true)
+if [ "${signup}" = true ]; then
+    warn "Open WebUI sign-up is open: once the admin exists, disable it in Admin Panel > Settings > General"
+fi
+if [ -f "${DEVBOX_SECRETS_DIR}/user-password.txt" ]; then
+    warn "${DEVBOX_SECRETS_DIR}/user-password.txt still exists: store the password, then delete the file"
 fi
 
-# -----------------------------------------------------------------------
-# Check 7: Traefik dashboard auth
-# -----------------------------------------------------------------------
 echo ""
-echo "7. Traefik Dashboard Authentication"
-TRAEFIK_AUTH="${DEVBOX_HOME}/traefik/dynamic/dashboard-auth.yml"
-if [ -f "${TRAEFIK_AUTH}" ]; then
-    check_pass "Traefik dashboard auth middleware configured"
-else
-    check_fail "Traefik dashboard auth not configured (${TRAEFIK_AUTH} missing)"
-fi
-
-OLLAMA_AUTH_YML="${DEVBOX_HOME}/traefik/dynamic/ollama-auth.yml"
-if [ -f "${OLLAMA_AUTH_YML}" ]; then
-    check_pass "Ollama basic-auth middleware configured"
-else
-    check_fail "Ollama basic-auth not configured (${OLLAMA_AUTH_YML} missing)"
-fi
-
-# -----------------------------------------------------------------------
-# Check 8: Health checks
-# -----------------------------------------------------------------------
-echo ""
-echo "8. Health Checks"
-for container in "${SERVICE_CONTAINERS[@]}"; do
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-        HEALTH=$(docker inspect "${container}" \
-            --format '{{.State.Health.Status}}' 2>/dev/null || true)
-        if [ -n "${HEALTH}" ] && [ "${HEALTH}" != "<no value>" ]; then
-            check_pass "${container} has health check (${HEALTH})"
-        else
-            check_warn "${container} has no health check"
-        fi
-    fi
-done
-
-# -----------------------------------------------------------------------
-# Check 9: umask hardening in setup.sh (when present on host)
-# -----------------------------------------------------------------------
-echo ""
-echo "9. setup.sh umask hardening"
-SETUP_CANDIDATES=(
-    "${DEVBOX_HOME}/../devbox/setup.sh"
-    "${DEVBOX_HOME}/setup.sh"
-)
-SETUP=""
-for c in "${SETUP_CANDIDATES[@]}"; do
-    if [ -f "${c}" ]; then
-        SETUP="${c}"
-        break
-    fi
-done
-if [ -n "${SETUP}" ]; then
-    if grep -q 'umask 077' "${SETUP}"; then
-        check_pass "setup.sh contains 'umask 077'"
-    else
-        check_warn "setup.sh does not set 'umask 077' (check for credential exposure)"
-    fi
-else
-    check_warn "setup.sh not found on host (not packaged in install dir)"
-fi
-
-# -----------------------------------------------------------------------
-# Check 10: flock available
-# -----------------------------------------------------------------------
-echo ""
-echo "10. Concurrency Safety"
-if command -v flock >/dev/null 2>&1; then
-    check_pass "flock is installed (util-linux)"
-else
-    check_fail "flock not found - install util-linux for safe concurrent script execution"
-fi
-
-# -----------------------------------------------------------------------
-# Summary
-# -----------------------------------------------------------------------
-echo ""
-echo "======================================================================="
-echo "Summary: ${PASS} passed, ${WARN} warnings, ${FAIL} failed"
-echo ""
-
-if [ "${FAIL}" -gt 0 ]; then
-    echo "[FAIL] Security issues detected - review and fix before production use"
-    exit 1
-elif [ "${WARN}" -gt 0 ]; then
-    echo "[WARN] Some warnings - review recommendations"
-    exit 0
-else
-    echo "[OK] All security checks passed!"
-    exit 0
-fi
+echo "Summary: ${PASS} ok, ${WARN} warnings, ${FAIL} failed"
+[ "${FAIL}" -eq 0 ]
