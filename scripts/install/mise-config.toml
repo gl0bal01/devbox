@@ -1,0 +1,17 @@
+# Installed by devbox setup.sh to /etc/mise/config.toml: toolchain defaults
+# for every user (a user's ~/.config/mise/config.toml overrides them).
+#
+# Versions track the latest stable release, resolved at install time.
+# Explicit aqua backends make mise verify each download against the
+# registry's checksums and, where published, cosign / SLSA / GitHub
+# attestations. Update with `mise upgrade`.
+[tools]
+node = "lts"
+bun = "latest"
+rust = "stable"
+uv = "latest"
+"aqua:neovim/neovim" = "latest"
+"aqua:jesseduffield/lazygit" = "latest"
+"aqua:jesseduffield/lazydocker" = "latest"
+"aqua:zellij-org/zellij" = "latest"
+"pypi:exegol" = "latest"

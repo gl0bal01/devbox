@@ -1,12 +1,7 @@
-# DevBox v3 — system-wide mise activation
-# Installed by setup.sh into /etc/profile.d/mise.sh (sourced by every login shell).
-# Source of truth: scripts/install/mise-profile.sh
 # shellcheck shell=sh
-
-# Pick the integration matching the current shell. /etc/profile.d is sourced
-# by both bash and zsh login shells, but `mise activate bash` emits bash-only
-# syntax that breaks under zsh.
-if [ -z "$SUDO_USER" ] && command -v mise >/dev/null 2>&1; then
+# Installed by devbox setup.sh to /etc/profile.d/mise.sh: activates mise in
+# every bash/zsh/sh login shell. Skipped for root, whose PATH stays clean.
+if [ "$(id -u)" -ne 0 ] && command -v mise >/dev/null 2>&1; then
     case "${ZSH_VERSION:+zsh}${BASH_VERSION:+bash}" in
         zsh)  eval "$(mise activate zsh)" ;;
         bash) eval "$(mise activate bash)" ;;
