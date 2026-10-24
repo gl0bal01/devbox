@@ -141,7 +141,7 @@ Containers that use a volume are paused while it is archived, so the Open WebUI 
 - **Signed release:** each month, if `main` changed, CI publishes `devbox.tar` signed with cosign keyless. Verify it before you install from it:
 
 ```bash
-gh release download monthly-YYYYMMDD -R gl0bal01/devbox -p 'devbox.tar*'
+gh release download <tag> -R gl0bal01/devbox -p 'devbox.tar*'
 sha256sum -c devbox.tar.sha256
 cosign verify-blob devbox.tar --bundle devbox.tar.sigstore.json \
   --certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/monthly-rebuild.yml@refs/heads/main' \

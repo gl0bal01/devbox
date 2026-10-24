@@ -249,7 +249,7 @@ Any failure in steps 2 to 4 restores the previous drop-in.
 **Decision.** `.github/workflows/monthly-rebuild.yml` has two jobs:
 
 - **`refresh`:** runs `update-images.sh --apply` and `update-pins.sh --apply`, smoke-tests the result with `scripts/ci/smoke-test.sh`, and opens one pull request on `chore/monthly-refresh`. It never pushes to `main`.
-- **`release`:** runs only when `main` moved since the last `monthly-*` tag and `pr-validate` (including e2e) passed on that commit. It smoke-tests, builds a deterministic `devbox.tar` with its SHA256, signs it with cosign keyless into a Sigstore bundle, and publishes a GitHub release with notes from `scripts/ci/release-notes.sh`.
+- **`release`:** publishes `monthly-YYYYMMDD`, or a `vX.Y.Z` tag given when the workflow is started by hand. A monthly run happens only when `main` moved since the last release tag and `pr-validate` (including e2e) passed on that commit. It smoke-tests, builds a deterministic `devbox.tar` with its SHA256, signs it with cosign keyless into a Sigstore bundle, and publishes a GitHub release with notes from `scripts/ci/release-notes.sh`.
 
 All actions are pinned by commit SHA.
 

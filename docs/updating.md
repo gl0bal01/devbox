@@ -57,7 +57,7 @@ Check out the previous commit or release, then run `sudo ./setup.sh` and `~/dock
 `.github/workflows/monthly-rebuild.yml` runs on the 1st of each month and can also be started by hand. It has two jobs:
 
 - **refresh** runs `update-images.sh --apply` and `update-pins.sh --apply`, then smoke-tests the result with `scripts/ci/smoke-test.sh`. It opens a single PR on branch `chore/monthly-refresh` and never pushes to `main`. GitHub doesn't run `pr-validate` on PRs opened with `GITHUB_TOKEN`, so close and reopen the PR (or push to it) to run the full checks before merging.
-- **release** builds a signed tarball from `main` and publishes it as release `monthly-YYYYMMDD`, after the same smoke test. It skips the run if `main` hasn't moved since the last `monthly-*` tag.
+- **release** builds a signed tarball from `main` and publishes it as release `monthly-YYYYMMDD`, after the same smoke test, and only if `pr-validate` passed on that commit. It skips the run if `main` hasn't moved since the last release tag. Named releases (`vX.Y.Z`) come from the same job: start the workflow by hand with the `tag` input (`gh workflow run monthly-rebuild.yml -f tag=v2.0.0`), which skips the refresh job. They verify exactly like monthly ones.
 
 ## Dev tools and host packages
 
@@ -88,7 +88,7 @@ Each monthly release has three assets:
 - `devbox.tar.sigstore.json`: a cosign keyless signature bundle, issued to the release workflow
 
 ```bash
-gh release download monthly-YYYYMMDD -R gl0bal01/devbox -p 'devbox.tar*'   # omit the tag for the latest release
+gh release download <tag> -R gl0bal01/devbox -p 'devbox.tar*'   # vX.Y.Z or monthly-YYYYMMDD; omit for the latest
 sha256sum -c devbox.tar.sha256
 cosign verify-blob devbox.tar --bundle devbox.tar.sigstore.json \
   --certificate-identity 'https://github.com/gl0bal01/devbox/.github/workflows/monthly-rebuild.yml@refs/heads/main' \

@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '0 6 1 * *'   # 1st of the month, 06:00 UTC
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Named release (vX.Y.Z): skips the refresh job and always releases. Empty = monthly-YYYYMMDD.'
+        required: false
+        default: ''
 
 concurrency:
   group: monthly-rebuild
@@ -16,6 +21,7 @@ jobs:
   # pushes to main. PRs opened with GITHUB_TOKEN do not trigger pr-validate:
   # close and reopen the PR (or push to it) to run the full suite.
   refresh:
+    if: ${{ inputs.tag == '' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -57,8 +63,9 @@ jobs:
           body-path: ${{ runner.temp }}/body.md
           delete-branch: true
 
-  # Release main as a signed tarball. Skipped when main has not moved since
-  # the previous monthly tag; refused unless pr-validate passed on that commit.
+  # Release main as a signed tarball, as monthly-YYYYMMDD or the dispatched
+  # vX.Y.Z tag. Monthly runs skip when main has not moved since the previous
+  # release tag; every release requires pr-validate to have passed on the commit.
   release:
     runs-on: ubuntu-24.04
     permissions:
@@ -72,12 +79,24 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Skip when main is unchanged
+      - name: Resolve tag; skip a monthly run when main is unchanged
         id: prev
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          prev=$(git tag -l 'monthly-*' --sort=-creatordate | head -n1)
+          tag="${INPUT_TAG:-monthly-$(date -u +%Y%m%d)}"
+          if ! [[ "${tag}" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|monthly-[0-9]{8})$ ]]; then
+            echo "Invalid tag '${tag}': use vX.Y.Z" >&2
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists." >&2
+            exit 1
+          fi
+          echo "release=${tag}" >> "$GITHUB_OUTPUT"
+          prev=$(git tag -l 'v*' 'monthly-*' --sort=-creatordate | head -n1)
           echo "tag=${prev}" >> "$GITHUB_OUTPUT"
-          if [ -n "${prev}" ] && [ "$(git rev-parse "${prev}^{commit}")" = "$(git rev-parse HEAD)" ]; then
+          if [ -z "${INPUT_TAG}" ] && [ -n "${prev}" ] && [ "$(git rev-parse "${prev}^{commit}")" = "$(git rev-parse HEAD)" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Require green pr-validate on this commit
@@ -114,8 +133,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PREV: ${{ steps.prev.outputs.tag }}
+          TAG: ${{ steps.prev.outputs.release }}
         run: |
-          tag="monthly-$(date -u +%Y%m%d)"
+          tag="${TAG}"
           scripts/ci/release-notes.sh "${PREV:-$(git rev-list --max-parents=0 HEAD)}" HEAD > notes.md
           gh release create "${tag}" --target "$(git rev-parse HEAD)" --title "${tag}" --notes-file notes.md \
             devbox.tar devbox.tar.sha256 devbox.tar.sigstore.json
