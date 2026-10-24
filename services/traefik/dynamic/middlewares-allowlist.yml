@@ -1,3 +1,4 @@
+# Defense in depth behind the Tailscale-only port binds.
 http:
   middlewares:
     internal-only:
@@ -5,5 +6,5 @@ http:
         sourceRange:
           - "100.64.0.0/10"        # Tailscale IPv4 CGNAT
           - "fd7a:115c:a1e0::/48"  # Tailscale IPv6 ULA
-          - "127.0.0.1/32"         # In-container healthcheck
-          - "::1/128"              # IPv6 loopback
+          - "127.0.0.1/32"         # in-container health checks
+          - "::1/128"

@@ -1,32 +1,23 @@
-# Traefik reverse proxy + docker-socket-proxy
+# Traefik reverse proxy + docker-socket-proxy (HTTP mode, Tailscale-bound).
 #
-# Base file: HTTP-only mode, Tailscale-bound.
-# For HTTPS mode, additionally use docker-compose.https.yml as a Compose override
-# (configured via COMPOSE_FILE in ~/.config/devbox/config.env).
+# setup.sh writes COMPOSE_FILE and TAILSCALE_IP into ./.env, so a plain
+# `docker compose <cmd>` in this directory always loads the full chain:
+# this file, docker-compose.https.yml in HTTPS mode, then the digest lock.
 #
-# Image digests are locked in docker-compose.lock.yml — that file is committed
-# and is ALWAYS included in the compose invocation. Do not edit image: lines
-# here; bump tags, then run scripts/update-images.sh --apply.
-#
-# x-logging: this anchor block is duplicated by design across every compose file
-# in services/. Drift detection is enforced by scripts/ci/check-anchor-consistency.sh.
-# Any change must be applied to every compose file in one commit.
+# Do not edit image digests by hand: bump the tag here, then run
+# scripts/update-images.sh --apply. Log rotation comes from the Docker daemon
+# defaults that setup.sh writes to /etc/docker/daemon.json.
 
-x-logging: &default-logging
-  driver: json-file
-  options:
-    max-size: "10m"
-    max-file: "3"
+name: traefik
 
 services:
-  # Docker socket proxy — exposes a read-only subset of the docker API to Traefik
-  # so Traefik never touches /var/run/docker.sock directly.
+  # Exposes a read-only subset of the Docker API so Traefik never touches
+  # /var/run/docker.sock directly.
   docker-socket-proxy:
     # upstream ships no minor tag; patch-pinned (bump manually)
     image: tecnativa/docker-socket-proxy:v0.5.0
     container_name: docker-socket-proxy
     restart: unless-stopped
-    logging: *default-logging
     stop_grace_period: 10s
     environment:
       CONTAINERS: 1
@@ -55,12 +46,9 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # NOTE: cannot set `read_only: true` here. tecnativa/docker-socket-proxy
-    # uses an HAProxy backend that renders /usr/local/etc/haproxy/haproxy.cfg
-    # at container start from a template shipped in the image; tmpfs would
-    # shadow the template, and read-only blocks the render. Defense-in-depth
-    # remains: cap_drop ALL, no-new-privileges, socket mounted :ro, and the
-    # env-var allowlist (only CONTAINERS/NETWORKS/SERVICES/TASKS=1).
+    # read_only is not possible: HAProxy renders its config from a template
+    # at start. cap_drop, no-new-privileges, the :ro socket and the env
+    # allowlist above carry the hardening.
     tmpfs:
       - /run
       - /tmp
@@ -78,7 +66,6 @@ services:
     image: traefik:v3.7
     container_name: traefik
     restart: unless-stopped
-    logging: *default-logging
     stop_grace_period: 30s
     depends_on:
       docker-socket-proxy:
@@ -92,12 +79,16 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Root without capabilities cannot read other users' files: join the
+    # operator's group to read the 0640 basic-auth middlewares in ./dynamic.
+    group_add:
+      - "${DEVBOX_GID:?DEVBOX_GID unset - see ./.env}"
     ports:
-      - "${TAILSCALE_IP}:80:80"
+      # Fails closed: an unset TAILSCALE_IP must never become a 0.0.0.0 bind.
+      - "${TAILSCALE_IP:?TAILSCALE_IP unset - run docker compose from ~/docker/traefik (its .env sets it)}:80:80"
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - ./dynamic:/etc/traefik/dynamic:ro
-      - ./logs:/var/log/traefik
     networks:
       - proxy-net
       - socket-proxy
@@ -107,6 +98,8 @@ services:
       - "traefik.http.routers.traefik.entrypoints=web"
       - "traefik.http.routers.traefik.service=api@internal"
       - "traefik.http.routers.traefik.middlewares=dashboard-auth@file"
+      # Set by setup.sh: recreates the container when traefik.yml changes.
+      - "devbox.config-hash=${TRAEFIK_CONFIG_HASH:-}"
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]
       interval: 30s
