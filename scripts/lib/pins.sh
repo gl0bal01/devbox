@@ -17,7 +17,7 @@ MISE_APT_KEY_FPR="24853EC9F655CE80B48E6C3A8B81C9D17413A06D"
 
 # Oh My Zsh is sourced by every dev login shell: pin the commit.
 OHMYZSH_REPO="https://github.com/ohmyzsh/ohmyzsh.git"
-OHMYZSH_COMMIT="2100c630ba4bd67bb48802c3e7da893a4fdaa1a0"
+OHMYZSH_COMMIT="17a2b4c3a5855524ad4772a17ada0dc474e2fdf3"
 
 # LazyVim starter is a template; lazy.nvim fetches the plugins it lists on
 # first launch, so pinning the starter alone would add nothing.
