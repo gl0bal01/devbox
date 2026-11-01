@@ -3,4 +3,4 @@ services:
   docker-socket-proxy:
     image: docker.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
   traefik:
-    image: docker.io/library/traefik:v3.7@sha256:c8a121e4bb1347e8fd52657fab12f2cb70b68f8a018895e2068f92c9e519b9c2
+    image: docker.io/library/traefik:v3.7@sha256:e9338a01a43389362bdef90afd4ff4a30dd6c0a2e1b0ce00c5e0f52659aa2d9c
